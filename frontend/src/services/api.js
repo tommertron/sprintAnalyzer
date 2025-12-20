@@ -51,40 +51,79 @@ export async function getSprints(credentials, boardId, limit = 6) {
 
 /**
  * Get all metrics summary for a board
+ * @param {Object} credentials - Jira credentials
+ * @param {number} boardId - Board ID
+ * @param {Array} excludedSpaces - Optional project keys to exclude from alignment
+ * @param {Object} dateRange - Optional { startDate, endDate } or { sprintCount } for filtering
  */
-export async function getMetricsSummary(credentials, boardId, initiativeBoards = []) {
+export async function getMetricsSummary(credentials, boardId, excludedSpaces = [], dateRange = null) {
   const client = createClient(credentials)
-  const response = await client.get(`/metrics/${boardId}/summary`, {
-    params: {
-      initiative_boards: initiativeBoards.join(',')
+  const params = {}
+  if (excludedSpaces.length > 0) {
+    params.excluded_spaces = excludedSpaces.join(',')
+  }
+  if (dateRange) {
+    if (dateRange.sprintCount) {
+      params.sprint_count = dateRange.sprintCount
+    } else {
+      if (dateRange.startDate) params.start_date = dateRange.startDate
+      if (dateRange.endDate) params.end_date = dateRange.endDate
     }
-  })
+  }
+  const response = await client.get(`/metrics/${boardId}/summary`, { params })
   return response.data.data
 }
 
 /**
  * Get velocity metrics
  */
-export async function getVelocityMetrics(credentials, boardId) {
+export async function getVelocityMetrics(credentials, boardId, dateRange = null) {
   const client = createClient(credentials)
-  const response = await client.get(`/metrics/${boardId}/velocity`)
+  const params = {}
+  if (dateRange) {
+    if (dateRange.sprintCount) {
+      params.sprint_count = dateRange.sprintCount
+    } else {
+      if (dateRange.startDate) params.start_date = dateRange.startDate
+      if (dateRange.endDate) params.end_date = dateRange.endDate
+    }
+  }
+  const response = await client.get(`/metrics/${boardId}/velocity`, { params })
   return response.data.data
 }
 
 /**
  * Get completion metrics
  */
-export async function getCompletionMetrics(credentials, boardId) {
+export async function getCompletionMetrics(credentials, boardId, dateRange = null) {
   const client = createClient(credentials)
-  const response = await client.get(`/metrics/${boardId}/completion`)
+  const params = {}
+  if (dateRange) {
+    if (dateRange.sprintCount) {
+      params.sprint_count = dateRange.sprintCount
+    } else {
+      if (dateRange.startDate) params.start_date = dateRange.startDate
+      if (dateRange.endDate) params.end_date = dateRange.endDate
+    }
+  }
+  const response = await client.get(`/metrics/${boardId}/completion`, { params })
   return response.data.data
 }
 
 /**
  * Get quality metrics
  */
-export async function getQualityMetrics(credentials, boardId) {
+export async function getQualityMetrics(credentials, boardId, dateRange = null) {
   const client = createClient(credentials)
-  const response = await client.get(`/metrics/${boardId}/quality`)
+  const params = {}
+  if (dateRange) {
+    if (dateRange.sprintCount) {
+      params.sprint_count = dateRange.sprintCount
+    } else {
+      if (dateRange.startDate) params.start_date = dateRange.startDate
+      if (dateRange.endDate) params.end_date = dateRange.endDate
+    }
+  }
+  const response = await client.get(`/metrics/${boardId}/quality`, { params })
   return response.data.data
 }

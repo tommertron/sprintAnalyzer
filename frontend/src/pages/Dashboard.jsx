@@ -1,13 +1,17 @@
 import { useState, useEffect, useCallback } from 'react'
 import { getBoards, getMetricsSummary } from '../services/api'
 import BoardSelector from '../components/BoardSelector'
+import DateRangeSelector from '../components/DateRangeSelector'
+import SpaceExclusionList from '../components/SpaceExclusionList'
 import MetricCard from '../components/MetricCard'
 import VelocityChart from '../components/VelocityChart'
 import CompletionChart from '../components/CompletionChart'
 import QualityMetrics from '../components/QualityMetrics'
+import AlignmentChart from '../components/AlignmentChart'
 
 const RECENT_BOARDS_KEY = 'sprintAnalyzer_recentBoards'
 const METRICS_CACHE_KEY = 'sprintAnalyzer_metricsCache'
+const EXCLUDED_SPACES_KEY = 'sprintAnalyzer_excludedSpaces'
 const MAX_RECENT_BOARDS = 5
 const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
 
@@ -57,6 +61,23 @@ const styles = {
     padding: '20px',
     marginBottom: '24px',
     boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+  },
+  controlsRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: '16px',
+    flexWrap: 'wrap'
+  },
+  dateRangeWrapper: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px'
+  },
+  dateRangeLabel: {
+    fontSize: '14px',
+    fontWeight: '500',
+    color: '#666'
   },
   metricsHeader: {
     display: 'flex',
@@ -174,6 +195,8 @@ function saveToStorage(key, value) {
 function Dashboard({ credentials, onLogout }) {
   const [boards, setBoards] = useState([])
   const [selectedBoard, setSelectedBoard] = useState(null)
+  const [dateRange, setDateRange] = useState(null) // null = last 6 sprints default
+  const [excludedSpaces, setExcludedSpaces] = useState([])
   const [metrics, setMetrics] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -181,10 +204,11 @@ function Dashboard({ credentials, onLogout }) {
   const [metricsCache, setMetricsCache] = useState({})
   const [lastFetched, setLastFetched] = useState(null)
 
-  // Load recent boards and cache from localStorage on mount
+  // Load recent boards, cache, and excluded spaces from localStorage on mount
   useEffect(() => {
     setRecentBoards(loadFromStorage(RECENT_BOARDS_KEY, []))
     setMetricsCache(loadFromStorage(METRICS_CACHE_KEY, {}))
+    setExcludedSpaces(loadFromStorage(EXCLUDED_SPACES_KEY, []))
   }, [])
 
   // Load boards list
@@ -192,7 +216,7 @@ function Dashboard({ credentials, onLogout }) {
     loadBoards()
   }, [])
 
-  // Load metrics when board changes
+  // Load metrics when board, date range, or excluded spaces change
   useEffect(() => {
     if (selectedBoard) {
       loadMetrics(selectedBoard, false)
@@ -200,7 +224,7 @@ function Dashboard({ credentials, onLogout }) {
       setMetrics(null)
       setLastFetched(null)
     }
-  }, [selectedBoard])
+  }, [selectedBoard, dateRange, excludedSpaces])
 
   const loadBoards = async () => {
     try {
@@ -212,9 +236,21 @@ function Dashboard({ credentials, onLogout }) {
   }
 
   const loadMetrics = useCallback(async (boardId, forceRefresh = false) => {
+    // Build cache key including date range or sprint count and excluded spaces
+    let rangeKey = 'default'
+    if (dateRange) {
+      if (dateRange.sprintCount) {
+        rangeKey = `sprints_${dateRange.sprintCount}`
+      } else {
+        rangeKey = `${dateRange.startDate}_${dateRange.endDate}`
+      }
+    }
+    const excludeKey = excludedSpaces.length > 0 ? `_excl_${excludedSpaces.sort().join('-')}` : ''
+    const cacheKey = `${boardId}_${rangeKey}${excludeKey}`
+
     // Check cache first (unless forcing refresh)
     if (!forceRefresh) {
-      const cached = metricsCache[boardId]
+      const cached = metricsCache[cacheKey]
       if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
         setMetrics(cached.data)
         setLastFetched(new Date(cached.timestamp))
@@ -226,14 +262,14 @@ function Dashboard({ credentials, onLogout }) {
     setError(null)
 
     try {
-      const data = await getMetricsSummary(credentials, boardId)
+      const data = await getMetricsSummary(credentials, boardId, excludedSpaces, dateRange)
       setMetrics(data)
 
-      // Update cache
+      // Update cache with date-range-aware key
       const now = Date.now()
       const newCache = {
         ...metricsCache,
-        [boardId]: { data, timestamp: now }
+        [cacheKey]: { data, timestamp: now }
       }
       setMetricsCache(newCache)
       saveToStorage(METRICS_CACHE_KEY, newCache)
@@ -246,7 +282,7 @@ function Dashboard({ credentials, onLogout }) {
     } finally {
       setLoading(false)
     }
-  }, [credentials, metricsCache])
+  }, [credentials, metricsCache, dateRange, excludedSpaces])
 
   const updateRecentBoards = (boardId) => {
     const board = boards.find(b => b.id === boardId)
@@ -259,6 +295,11 @@ function Dashboard({ credentials, onLogout }) {
 
     setRecentBoards(newRecent)
     saveToStorage(RECENT_BOARDS_KEY, newRecent)
+  }
+
+  const handleExcludedSpacesChange = (newExcluded) => {
+    setExcludedSpaces(newExcluded)
+    saveToStorage(EXCLUDED_SPACES_KEY, newExcluded)
   }
 
   const handleRefresh = () => {
@@ -283,6 +324,13 @@ function Dashboard({ credentials, onLogout }) {
     return lastFetched.toLocaleTimeString()
   }
 
+  // Get sprint count label for chart titles
+  const getSprintCountLabel = () => {
+    const count = metrics?.velocity?.sprints?.length || 0
+    if (count === 0) return ''
+    return `(${count} Sprint${count === 1 ? '' : 's'})`
+  }
+
   return (
     <div style={styles.container}>
       <header style={styles.header}>
@@ -304,13 +352,22 @@ function Dashboard({ credentials, onLogout }) {
 
       <main style={styles.main}>
         <div style={styles.controls}>
-          <BoardSelector
-            boards={boards}
-            selectedBoard={selectedBoard}
-            onSelect={setSelectedBoard}
-            recentBoards={recentBoards}
-            onSelectRecent={handleSelectRecent}
-          />
+          <div style={styles.controlsRow}>
+            <BoardSelector
+              boards={boards}
+              selectedBoard={selectedBoard}
+              onSelect={setSelectedBoard}
+              recentBoards={recentBoards}
+              onSelectRecent={handleSelectRecent}
+            />
+            <div style={styles.dateRangeWrapper}>
+              <span style={styles.dateRangeLabel}>Time period:</span>
+              <DateRangeSelector
+                value={dateRange}
+                onChange={setDateRange}
+              />
+            </div>
+          </div>
         </div>
 
         {error && <div style={styles.error}>{error}</div>}
@@ -369,7 +426,7 @@ function Dashboard({ credentials, onLogout }) {
 
             <div style={styles.chartSection}>
               <div style={styles.sectionHeader}>
-                <h2 style={styles.sectionTitle}>Velocity Trend (Last 6 Sprints)</h2>
+                <h2 style={styles.sectionTitle}>Velocity Trend {getSprintCountLabel()}</h2>
                 <div style={styles.chartCallouts}>
                   <div style={styles.callout}>
                     <div style={styles.calloutLabel}>Average</div>
@@ -385,7 +442,7 @@ function Dashboard({ credentials, onLogout }) {
 
             <div style={styles.chartSection}>
               <div style={styles.sectionHeader}>
-                <h2 style={styles.sectionTitle}>Completion Rate (Last 6 Sprints)</h2>
+                <h2 style={styles.sectionTitle}>Completion Rate {getSprintCountLabel()}</h2>
                 <div style={styles.chartCallouts}>
                   <div style={styles.callout}>
                     <div style={styles.calloutLabel}>Average</div>
@@ -401,7 +458,7 @@ function Dashboard({ credentials, onLogout }) {
 
             <div style={styles.chartSection}>
               <div style={styles.sectionHeader}>
-                <h2 style={styles.sectionTitle}>Quality Metrics (Last 6 Sprints)</h2>
+                <h2 style={styles.sectionTitle}>Quality Metrics {getSprintCountLabel()}</h2>
                 <div style={styles.chartCallouts}>
                   {(() => {
                     const sprints = metrics.quality?.sprints || []
@@ -443,6 +500,52 @@ function Dashboard({ credentials, onLogout }) {
                 </div>
               </div>
               <QualityMetrics data={metrics.quality?.sprints || []} />
+            </div>
+
+            <div style={styles.chartSection}>
+              <div style={styles.sectionHeader}>
+                <h2 style={styles.sectionTitle}>Strategic Alignment {getSprintCountLabel()}</h2>
+                <div style={styles.chartCallouts}>
+                  {(() => {
+                    const sprints = metrics.alignment?.sprints || []
+                    const totalLinked = sprints.reduce((sum, s) => sum + (s.linkedToInitiative || 0), 0)
+                    const totalOrphan = sprints.reduce((sum, s) => sum + (s.orphanCount || 0), 0)
+                    const total = totalLinked + totalOrphan
+                    const linkedPct = total > 0 ? (totalLinked / total * 100) : 0
+                    return (
+                      <>
+                        <div style={styles.callout}>
+                          <div style={styles.calloutLabel}>Initiative-Linked</div>
+                          <div style={styles.calloutValue}>
+                            {linkedPct.toFixed(1)}
+                            <span style={styles.calloutUnit}>%</span>
+                          </div>
+                        </div>
+                        <div style={styles.callout}>
+                          <div style={styles.calloutLabel}>Total Points</div>
+                          <div style={styles.calloutValue}>
+                            {total.toFixed(1)}
+                            <span style={styles.calloutUnit}> pts</span>
+                          </div>
+                        </div>
+                      </>
+                    )
+                  })()}
+                </div>
+              </div>
+              <SpaceExclusionList
+                discoveredSpaces={metrics.alignment?.discoveredSpaces || []}
+                excludedSpaces={excludedSpaces}
+                onChange={handleExcludedSpacesChange}
+              />
+              <AlignmentChart
+                data={metrics.alignment?.sprints || []}
+                discoveredSpaces={(metrics.alignment?.discoveredSpaces || []).map(space => ({
+                  ...space,
+                  isExcluded: excludedSpaces.includes(space.projectKey)
+                }))}
+                jiraServer={credentials.server}
+              />
             </div>
           </>
         )}

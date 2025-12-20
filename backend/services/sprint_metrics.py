@@ -60,9 +60,21 @@ class SprintMetricsService:
         self._story_points_fields_cache = sp_fields
         return sp_fields
 
-    def _get_sprints(self, board_id: int, limit: int = 6) -> list:
-        """Get the last N completed sprints for a board."""
-        cache_key = f"{board_id}_{limit}"
+    def _get_sprints(self, board_id: int, limit: int = 6,
+                     start_date: str = None, end_date: str = None,
+                     sprint_count: int = None) -> list:
+        """Get completed sprints for a board.
+
+        Args:
+            board_id: Jira board ID
+            limit: Number of sprints to return (default 6, ignored if date range or sprint_count provided)
+            start_date: Optional ISO date string (e.g., "2024-01-01") - filter sprints ending on or after
+            end_date: Optional ISO date string (e.g., "2024-03-31") - filter sprints ending on or before
+            sprint_count: Optional number of sprints to include (overrides limit)
+        """
+        # Use sprint_count if provided, otherwise use limit
+        effective_limit = sprint_count if sprint_count else limit
+        cache_key = f"{board_id}_{effective_limit}_{start_date}_{end_date}"
         if cache_key in self._sprints_cache:
             return self._sprints_cache[cache_key]
 
@@ -86,7 +98,21 @@ class SprintMetricsService:
             start_at += max_results
 
         all_sprints.sort(key=lambda s: s.get("endDate", ""), reverse=True)
-        result = all_sprints[:limit]
+
+        # Apply date range filter if provided
+        if start_date or end_date:
+            filtered = []
+            for sprint in all_sprints:
+                sprint_end = sprint.get("endDate", "")[:10]  # Get YYYY-MM-DD portion
+                if start_date and sprint_end < start_date:
+                    continue
+                if end_date and sprint_end > end_date:
+                    continue
+                filtered.append(sprint)
+            result = filtered
+        else:
+            result = all_sprints[:effective_limit]
+
         self._sprints_cache[cache_key] = result
         return result
 
@@ -130,10 +156,12 @@ class SprintMetricsService:
         self._issues_cache[sprint_id] = all_issues
         return all_issues
 
-    def _prefetch_all_data(self, board_id: int) -> tuple:
+    def _prefetch_all_data(self, board_id: int,
+                           start_date: str = None, end_date: str = None,
+                           sprint_count: int = None) -> tuple:
         """Fetch all sprints and their issues upfront in parallel."""
         # Get sprints first
-        sprints = self._get_sprints(board_id)
+        sprints = self._get_sprints(board_id, start_date=start_date, end_date=end_date, sprint_count=sprint_count)
 
         # Fetch issues for all sprints in parallel
         sprint_issues = {}
@@ -312,39 +340,448 @@ class SprintMetricsService:
 
         return {"sprints": sprint_quality}
 
-    def _calculate_alignment(self, sprints: list, sprint_issues: dict, initiative_boards: list) -> dict:
-        """Calculate strategic alignment metrics from prefetched data."""
-        sprint_alignment = []
+    def _get_issue_parent(self, issue_key: str) -> Optional[dict]:
+        """Fetch an issue's parent (if any).
+
+        Returns:
+            Dict with parent info or None
+        """
+        cache_key = f"parent_{issue_key}"
+        if cache_key in self._issues_cache:
+            return self._issues_cache[cache_key]
+
+        try:
+            data = self._request(
+                f"/rest/api/3/issue/{issue_key}",
+                params={"fields": "parent"}
+            )
+            parent = data.get("fields", {}).get("parent")
+            if parent:
+                result = {
+                    "key": parent.get("key"),
+                    "summary": parent.get("fields", {}).get("summary", ""),
+                    "projectKey": parent.get("key", "").split("-")[0] if parent.get("key") else None,
+                    "issueType": parent.get("fields", {}).get("issuetype", {}).get("name", "")
+                }
+            else:
+                result = None
+
+            self._issues_cache[cache_key] = result
+            return result
+        except Exception:
+            self._issues_cache[cache_key] = None
+            return None
+
+    def _get_initiative_from_parent(self, parent_key: str, is_subtask_parent: bool = False) -> Optional[dict]:
+        """Traverse up from a parent to find the Initiative.
+
+        For regular issues (Story/Bug/Task): parent is Epic, so we get Epic's parent (Initiative) - 1 hop
+        For sub-tasks: parent is Story, so we need Story → Epic → Initiative - 2 hops
+
+        Args:
+            parent_key: The direct parent's issue key
+            is_subtask_parent: If True, parent is a Story (need extra level)
+
+        Returns:
+            Dict with initiative info or None if not found
+        """
+        if is_subtask_parent:
+            # Sub-task path: parent_key is Story
+            # Need: Story → Epic → Initiative (2 hops)
+            epic = self._get_issue_parent(parent_key)  # Story → Epic
+            if not epic:
+                return None
+            initiative = self._get_issue_parent(epic["key"])  # Epic → Initiative
+            return initiative
+        else:
+            # Regular path: parent_key is Epic
+            # Need: Epic → Initiative (1 hop)
+            initiative = self._get_issue_parent(parent_key)  # Epic → Initiative
+            return initiative
+
+    def _get_initiatives_batch(self, parent_keys_info: list) -> dict:
+        """Fetch initiatives for multiple parent keys.
+
+        Args:
+            parent_keys_info: List of tuples (parent_key, is_subtask_parent)
+
+        Returns:
+            Dict mapping parent key to initiative info
+        """
+        if not parent_keys_info:
+            return {}
+
+        results = {}
+        uncached = []
+
+        for parent_key, is_subtask in parent_keys_info:
+            cache_key = f"initiative_{parent_key}_{is_subtask}"
+            if cache_key in self._issues_cache:
+                cached = self._issues_cache[cache_key]
+                if cached is not None:
+                    results[parent_key] = cached
+            else:
+                uncached.append((parent_key, is_subtask))
+
+        if not uncached:
+            return results
+
+        def fetch_initiative(item):
+            parent_key, is_subtask = item
+            initiative = self._get_initiative_from_parent(parent_key, is_subtask)
+            cache_key = f"initiative_{parent_key}_{is_subtask}"
+            self._issues_cache[cache_key] = initiative
+            return parent_key, initiative
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(fetch_initiative, item): item for item in uncached}
+            for future in as_completed(futures):
+                parent_key, initiative = future.result()
+                if initiative:
+                    results[parent_key] = initiative
+
+        return results
+
+    def _calculate_alignment(self, sprints: list, sprint_issues: dict, excluded_spaces: list = None) -> dict:
+        """Calculate strategic alignment metrics by finding the Initiative for each issue.
+
+        Hierarchy handling:
+        - Story/Bug/Task: Story → Epic → Initiative (2 levels up)
+        - Sub-task WITH points: Sub-task → Story → Epic → Initiative (3 levels up)
+        - Sub-task WITHOUT points: Skip entirely (parent story covers it)
+
+        Uses story points for calculations (with fallback average for unpointed).
+
+        Args:
+            sprints: List of sprint data
+            sprint_issues: Dict mapping sprint ID to issues
+            excluded_spaces: List of project keys to exclude from alignment calculations
+        """
+        excluded_spaces = excluded_spaces or []
+        excluded_set = set(excluded_spaces)
+
+        # Calculate fallback average from all completed NON-subtask issues with points
+        all_points = []
+        for sprint in sprints:
+            issues = sprint_issues.get(sprint["id"], [])
+            for issue in issues:
+                if self._is_completed(issue):
+                    is_subtask = issue.get("fields", {}).get("issuetype", {}).get("subtask", False)
+                    if not is_subtask:
+                        points = self._get_story_points(issue)
+                        if points is not None:
+                            all_points.append(points)
+        fallback_avg = sum(all_points) / len(all_points) if all_points else 1.0
+
+        # First pass: collect parent keys and track if they're from sub-tasks
+        # Key: (parent_key, is_subtask) to handle different traversal depths
+        parent_info = {}  # parent_key -> is_subtask (True if any sub-task uses it)
+        issues_to_process = []  # (issue, points, parent_key, is_subtask, sprint_id)
+
+        # Track seen issues to avoid double-counting across sprints
+        seen_issue_keys = set()
+
+        # Track which stories have pointed sub-tasks (so we don't double-count)
+        stories_with_pointed_subtasks = set()
+
+        # First, identify stories that have pointed sub-tasks
+        for sprint in sprints:
+            issues = sprint_issues.get(sprint["id"], [])
+            for issue in issues:
+                if not self._is_completed(issue):
+                    continue
+                fields = issue.get("fields", {})
+                is_subtask = fields.get("issuetype", {}).get("subtask", False)
+                if is_subtask:
+                    points = self._get_story_points(issue)
+                    if points is not None:
+                        # This sub-task has points - mark its parent story
+                        parent = fields.get("parent")
+                        if parent and parent.get("key"):
+                            stories_with_pointed_subtasks.add(parent.get("key"))
 
         for sprint in sprints:
             issues = sprint_issues.get(sprint["id"], [])
-
-            total_completed = 0
-            linked_to_epic = 0
-
             for issue in issues:
-                if self._is_completed(issue):
-                    total_completed += 1
+                if not self._is_completed(issue):
+                    continue
 
-                    fields = issue.get("fields", {})
-                    parent = fields.get("parent")
-                    if parent:
-                        linked_to_epic += 1
+                issue_key = issue.get("key")
 
-            linked_pct = (linked_to_epic / total_completed * 100) if total_completed > 0 else 0
+                # Skip if we've already processed this issue (prevents double-counting)
+                if issue_key in seen_issue_keys:
+                    continue
+                seen_issue_keys.add(issue_key)
+
+                fields = issue.get("fields", {})
+                issue_type_obj = fields.get("issuetype", {})
+                # Jira's issuetype has a 'subtask' boolean field
+                is_subtask = issue_type_obj.get("subtask", False)
+
+                # Get points
+                points = self._get_story_points(issue)
+
+                # Skip sub-tasks without points (parent story covers them)
+                if is_subtask and points is None:
+                    continue
+
+                # Skip stories/tasks that have pointed sub-tasks (sub-tasks cover them)
+                if not is_subtask and issue_key in stories_with_pointed_subtasks:
+                    continue
+
+                # Use fallback for non-subtasks without points
+                if points is None:
+                    points = fallback_avg
+
+                parent = fields.get("parent")
+                if parent and parent.get("key"):
+                    parent_key = parent.get("key")
+                    # Track this parent and whether it comes from a sub-task
+                    if parent_key not in parent_info:
+                        parent_info[parent_key] = is_subtask
+                    issues_to_process.append((issue, points, parent_key, is_subtask, sprint["id"]))
+                else:
+                    # No parent - orphan
+                    issues_to_process.append((issue, points, None, is_subtask, sprint["id"]))
+
+        # Batch fetch initiatives - need to handle sub-task parents differently
+        parent_keys_info = [(key, is_sub) for key, is_sub in parent_info.items()]
+        parent_to_initiative = self._get_initiatives_batch(parent_keys_info)
+
+        # Track discovered spaces with full hierarchy for debugging
+        # Structure: projectKey -> {initiatives: {init_key -> {summary, points, epics: {epic_key -> {summary, points, issues: []}}}}}
+        discovered_spaces = {}
+
+        # Aggregate points by sprint
+        sprint_totals = {}  # sprint_id -> {total, linked, orphan}
+        for sprint in sprints:
+            sprint_totals[sprint["id"]] = {"total": 0.0, "linked": 0.0, "orphan": 0.0}
+
+        # Also need to fetch epic details for the hierarchy
+        # For regular issues: parent_key IS the epic
+        # For sub-tasks: need to get the story's parent (the epic)
+        epic_keys_to_fetch = set()
+        story_to_epic = {}  # For sub-tasks: story_key -> epic_key
+
+        for issue, points, parent_key, is_subtask, sprint_id in issues_to_process:
+            if parent_key:
+                if is_subtask:
+                    # parent_key is a Story, need to get Story's parent (Epic)
+                    story_parent = self._get_issue_parent(parent_key)
+                    if story_parent:
+                        epic_key = story_parent["key"]
+                        story_to_epic[parent_key] = epic_key
+                        epic_keys_to_fetch.add(epic_key)
+                else:
+                    # parent_key is already the Epic
+                    epic_keys_to_fetch.add(parent_key)
+
+        # Batch fetch epic details
+        epic_details = {}
+        for epic_key in epic_keys_to_fetch:
+            details = self._get_issue_parent(epic_key)  # This gets us the epic's info from cache
+            # Actually we need the epic itself, not its parent. Let me fetch it directly.
+            try:
+                data = self._request(
+                    f"/rest/api/3/issue/{epic_key}",
+                    params={"fields": "summary,issuetype"}
+                )
+                epic_details[epic_key] = {
+                    "key": epic_key,
+                    "summary": data.get("fields", {}).get("summary", ""),
+                    "issueType": data.get("fields", {}).get("issuetype", {}).get("name", "")
+                }
+            except Exception:
+                epic_details[epic_key] = {"key": epic_key, "summary": "", "issueType": "Epic"}
+
+        # Process all issues and build full hierarchy
+        for issue, points, parent_key, is_subtask, sprint_id in issues_to_process:
+            sprint_totals[sprint_id]["total"] += points
+
+            if parent_key:
+                initiative = parent_to_initiative.get(parent_key)
+
+                if initiative:
+                    project_key = initiative["projectKey"]
+
+                    # Track in discovered spaces with full hierarchy
+                    if project_key not in discovered_spaces:
+                        discovered_spaces[project_key] = {
+                            "projectKey": project_key,
+                            "initiatives": {}
+                        }
+
+                    init_key = initiative["key"]
+                    if init_key not in discovered_spaces[project_key]["initiatives"]:
+                        discovered_spaces[project_key]["initiatives"][init_key] = {
+                            "key": init_key,
+                            "summary": initiative["summary"],
+                            "issueType": initiative["issueType"],
+                            "points": 0.0,
+                            "epics": {}  # epic_key -> {details, issues: []}
+                        }
+
+                    init_data = discovered_spaces[project_key]["initiatives"][init_key]
+                    init_data["points"] += points
+
+                    # Determine the epic key
+                    if is_subtask:
+                        epic_key = story_to_epic.get(parent_key)
+                        story_key = parent_key
+                    else:
+                        epic_key = parent_key
+                        story_key = None
+
+                    # Add epic to hierarchy if not present
+                    if epic_key and epic_key not in init_data["epics"]:
+                        epic_info = epic_details.get(epic_key, {"key": epic_key, "summary": "", "issueType": "Epic"})
+                        init_data["epics"][epic_key] = {
+                            "key": epic_key,
+                            "summary": epic_info["summary"],
+                            "issueType": epic_info["issueType"],
+                            "points": 0.0,
+                            "children": {}  # issue_key -> {details, imaginaryFriends: []}
+                        }
+
+                    if epic_key:
+                        epic_data = init_data["epics"][epic_key]
+                        epic_data["points"] += points
+
+                        # Get issue details
+                        issue_key = issue.get("key")
+                        issue_fields = issue.get("fields", {})
+                        issue_summary = issue_fields.get("summary", "")
+                        issue_type = issue_fields.get("issuetype", {}).get("name", "")
+
+                        if is_subtask:
+                            # This is an imaginary friend - add under its parent story
+                            if story_key not in epic_data["children"]:
+                                # Need to fetch story details
+                                try:
+                                    story_data = self._request(
+                                        f"/rest/api/3/issue/{story_key}",
+                                        params={"fields": "summary,issuetype"}
+                                    )
+                                    epic_data["children"][story_key] = {
+                                        "key": story_key,
+                                        "summary": story_data.get("fields", {}).get("summary", ""),
+                                        "issueType": story_data.get("fields", {}).get("issuetype", {}).get("name", ""),
+                                        "points": 0.0,
+                                        "imaginaryFriends": []
+                                    }
+                                except Exception:
+                                    epic_data["children"][story_key] = {
+                                        "key": story_key,
+                                        "summary": "",
+                                        "issueType": "Story",
+                                        "points": 0.0,
+                                        "imaginaryFriends": []
+                                    }
+
+                            # Add sub-task to imaginary friends
+                            epic_data["children"][story_key]["imaginaryFriends"].append({
+                                "key": issue_key,
+                                "summary": issue_summary,
+                                "issueType": issue_type,
+                                "points": points
+                            })
+                            epic_data["children"][story_key]["points"] += points
+                        else:
+                            # Regular issue - add as child of epic
+                            if issue_key not in epic_data["children"]:
+                                epic_data["children"][issue_key] = {
+                                    "key": issue_key,
+                                    "summary": issue_summary,
+                                    "issueType": issue_type,
+                                    "points": 0.0,
+                                    "imaginaryFriends": []
+                                }
+                            epic_data["children"][issue_key]["points"] += points
+
+                    # Check if this space is excluded
+                    if project_key not in excluded_set:
+                        sprint_totals[sprint_id]["linked"] += points
+                    else:
+                        sprint_totals[sprint_id]["orphan"] += points
+                else:
+                    sprint_totals[sprint_id]["orphan"] += points
+            else:
+                sprint_totals[sprint_id]["orphan"] += points
+
+        # Build sprint alignment results
+        sprint_alignment = []
+        for sprint in sprints:
+            totals = sprint_totals[sprint["id"]]
+            total_points = totals["total"]
+            linked_points = totals["linked"]
+            orphan_points = totals["orphan"]
+
+            linked_pct = (linked_points / total_points * 100) if total_points > 0 else 0
 
             sprint_alignment.append({
                 "sprintId": sprint["id"],
                 "sprintName": sprint["name"],
-                "totalCompleted": total_completed,
-                "linkedToEpic": linked_to_epic,
+                "totalPoints": round(total_points, 1),
+                "linkedToInitiative": round(linked_points, 1),
+                "orphanCount": round(orphan_points, 1),
                 "initiativeLinkedPercentage": round(linked_pct, 1),
                 "orphanPercentage": round(100 - linked_pct, 1)
             })
 
+        # Convert discovered spaces for JSON serialization with full hierarchy
+        spaces_list = []
+        for project_key, data in discovered_spaces.items():
+            initiatives_list = []
+            for init_key, init_data in data["initiatives"].items():
+                # Convert epics dict to sorted list
+                epics_list = []
+                for epic_key, epic_data in init_data.get("epics", {}).items():
+                    # Convert children dict to sorted list
+                    children_list = []
+                    for child_key, child_data in epic_data.get("children", {}).items():
+                        children_list.append({
+                            "key": child_data["key"],
+                            "summary": child_data["summary"],
+                            "issueType": child_data["issueType"],
+                            "points": round(child_data["points"], 1),
+                            "imaginaryFriends": sorted(
+                                child_data.get("imaginaryFriends", []),
+                                key=lambda x: x["points"],
+                                reverse=True
+                            )
+                        })
+                    children_list.sort(key=lambda x: x["points"], reverse=True)
+
+                    epics_list.append({
+                        "key": epic_data["key"],
+                        "summary": epic_data["summary"],
+                        "issueType": epic_data["issueType"],
+                        "points": round(epic_data["points"], 1),
+                        "children": children_list
+                    })
+                epics_list.sort(key=lambda x: x["points"], reverse=True)
+
+                initiatives_list.append({
+                    "key": init_data["key"],
+                    "summary": init_data["summary"],
+                    "issueType": init_data["issueType"],
+                    "points": round(init_data["points"], 1),
+                    "epics": epics_list
+                })
+            initiatives_list.sort(key=lambda x: x["points"], reverse=True)
+
+            total_pts = sum(i["points"] for i in initiatives_list)
+            spaces_list.append({
+                "projectKey": project_key,
+                "isExcluded": project_key in excluded_set,
+                "totalCount": round(total_pts, 1),
+                "initiatives": initiatives_list
+            })
+
         return {
             "sprints": sprint_alignment,
-            "initiativeBoards": initiative_boards
+            "discoveredSpaces": sorted(spaces_list, key=lambda x: x["totalCount"], reverse=True),
+            "excludedSpaces": excluded_spaces
         }
 
     def _calculate_coverage(self, sprints: list, sprint_issues: dict) -> dict:
@@ -385,41 +822,53 @@ class SprintMetricsService:
         }
 
     # Public methods - these can still be called individually if needed
-    def get_velocity_metrics(self, board_id: int) -> dict:
-        """Calculate velocity metrics for last 6 sprints."""
-        sprints, sprint_issues = self._prefetch_all_data(board_id)
+    def get_velocity_metrics(self, board_id: int,
+                             start_date: str = None, end_date: str = None,
+                             sprint_count: int = None) -> dict:
+        """Calculate velocity metrics for sprints in date range (or last 6)."""
+        sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
         return self._calculate_velocity(sprints, sprint_issues)
 
-    def get_completion_metrics(self, board_id: int) -> dict:
-        """Calculate completion metrics for last 6 sprints."""
-        sprints, sprint_issues = self._prefetch_all_data(board_id)
+    def get_completion_metrics(self, board_id: int,
+                               start_date: str = None, end_date: str = None,
+                               sprint_count: int = None) -> dict:
+        """Calculate completion metrics for sprints in date range (or last 6)."""
+        sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
         return self._calculate_completion(sprints, sprint_issues)
 
-    def get_quality_metrics(self, board_id: int) -> dict:
-        """Calculate quality metrics for last 6 sprints."""
-        sprints, sprint_issues = self._prefetch_all_data(board_id)
+    def get_quality_metrics(self, board_id: int,
+                            start_date: str = None, end_date: str = None,
+                            sprint_count: int = None) -> dict:
+        """Calculate quality metrics for sprints in date range (or last 6)."""
+        sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
         return self._calculate_quality(sprints, sprint_issues)
 
-    def get_alignment_metrics(self, board_id: int, initiative_boards: list) -> dict:
+    def get_alignment_metrics(self, board_id: int, excluded_spaces: list = None,
+                              start_date: str = None, end_date: str = None,
+                              sprint_count: int = None) -> dict:
         """Calculate strategic alignment metrics."""
-        sprints, sprint_issues = self._prefetch_all_data(board_id)
-        return self._calculate_alignment(sprints, sprint_issues, initiative_boards)
+        sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
+        return self._calculate_alignment(sprints, sprint_issues, excluded_spaces)
 
-    def get_coverage_metrics(self, board_id: int) -> dict:
+    def get_coverage_metrics(self, board_id: int,
+                             start_date: str = None, end_date: str = None,
+                             sprint_count: int = None) -> dict:
         """Calculate story point coverage metrics."""
-        sprints, sprint_issues = self._prefetch_all_data(board_id)
+        sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
         return self._calculate_coverage(sprints, sprint_issues)
 
-    def get_all_metrics(self, board_id: int, initiative_boards: list) -> dict:
+    def get_all_metrics(self, board_id: int, excluded_spaces: list = None,
+                        start_date: str = None, end_date: str = None,
+                        sprint_count: int = None) -> dict:
         """Get all metrics combined for dashboard - single fetch, parallel processing."""
         # Single prefetch of all data
-        sprints, sprint_issues = self._prefetch_all_data(board_id)
+        sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
 
         # Calculate all metrics from the same dataset
         return {
             "velocity": self._calculate_velocity(sprints, sprint_issues),
             "completion": self._calculate_completion(sprints, sprint_issues),
             "quality": self._calculate_quality(sprints, sprint_issues),
-            "alignment": self._calculate_alignment(sprints, sprint_issues, initiative_boards),
+            "alignment": self._calculate_alignment(sprints, sprint_issues, excluded_spaces),
             "coverage": self._calculate_coverage(sprints, sprint_issues)
         }

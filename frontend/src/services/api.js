@@ -55,8 +55,9 @@ export async function getSprints(credentials, boardId, limit = 6) {
  * @param {number} boardId - Board ID
  * @param {Array} excludedSpaces - Optional project keys to exclude from alignment
  * @param {Object} dateRange - Optional { startDate, endDate } or { sprintCount } for filtering
+ * @param {string} serviceLabel - Optional label to identify service investment initiatives
  */
-export async function getMetricsSummary(credentials, boardId, excludedSpaces = [], dateRange = null) {
+export async function getMetricsSummary(credentials, boardId, excludedSpaces = [], dateRange = null, serviceLabel = null) {
   const client = createClient(credentials)
   const params = {}
   if (excludedSpaces.length > 0) {
@@ -69,6 +70,9 @@ export async function getMetricsSummary(credentials, boardId, excludedSpaces = [
       if (dateRange.startDate) params.start_date = dateRange.startDate
       if (dateRange.endDate) params.end_date = dateRange.endDate
     }
+  }
+  if (serviceLabel) {
+    params.service_label = serviceLabel
   }
   const response = await client.get(`/metrics/${boardId}/summary`, { params })
   return response.data.data

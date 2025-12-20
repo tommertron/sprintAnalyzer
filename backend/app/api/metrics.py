@@ -59,6 +59,18 @@ def get_sprint_count():
     return None
 
 
+def get_service_label():
+    """Get optional service label from query params.
+
+    Query params:
+        - service_label: Label that marks initiatives as service investment
+
+    Returns:
+        str or None
+    """
+    return request.args.get("service_label")
+
+
 @bp.route("/<int:board_id>/velocity", methods=["GET"])
 def get_velocity(board_id):
     """Get velocity metrics for sprints.
@@ -158,11 +170,14 @@ def get_alignment(board_id):
         - start_date: Optional ISO date (e.g., "2024-01-01")
         - end_date: Optional ISO date (e.g., "2024-03-31")
         - sprint_count: Optional number of sprints to include
+        - service_label: Optional label to identify service investment initiatives
 
     Returns:
         - Initiative-linked work percentage
         - Non-initiative (orphan) work percentage
         - Discovered spaces with initiatives
+        - Service vs business breakdown (if service_label provided)
+        - All labels found across initiatives
     """
     server, email, token = get_jira_credentials()
 
@@ -172,10 +187,11 @@ def get_alignment(board_id):
     excluded_spaces = get_excluded_spaces()
     start_date, end_date = get_date_range()
     sprint_count = get_sprint_count()
+    service_label = get_service_label()
 
     try:
         service = SprintMetricsService(server, email, token)
-        alignment_data = service.get_alignment_metrics(board_id, excluded_spaces, start_date, end_date, sprint_count)
+        alignment_data = service.get_alignment_metrics(board_id, excluded_spaces, start_date, end_date, sprint_count, service_label)
         return jsonify({"data": alignment_data})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -281,6 +297,7 @@ def get_summary(board_id):
         - start_date: Optional ISO date (e.g., "2024-01-01")
         - end_date: Optional ISO date (e.g., "2024-03-31")
         - sprint_count: Optional number of sprints to include
+        - service_label: Optional label to identify service investment initiatives
 
     Returns combined object with all metric categories.
     """
@@ -292,10 +309,11 @@ def get_summary(board_id):
     excluded_spaces = get_excluded_spaces()
     start_date, end_date = get_date_range()
     sprint_count = get_sprint_count()
+    service_label = get_service_label()
 
     try:
         service = SprintMetricsService(server, email, token)
-        summary = service.get_all_metrics(board_id, excluded_spaces, start_date, end_date, sprint_count)
+        summary = service.get_all_metrics(board_id, excluded_spaces, start_date, end_date, sprint_count, service_label)
         return jsonify({"data": summary})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

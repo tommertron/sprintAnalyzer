@@ -12,6 +12,7 @@ import AlignmentChart from '../components/AlignmentChart'
 const RECENT_BOARDS_KEY = 'sprintAnalyzer_recentBoards'
 const METRICS_CACHE_KEY = 'sprintAnalyzer_metricsCache'
 const EXCLUDED_SPACES_KEY = 'sprintAnalyzer_excludedSpaces'
+const SERVICE_LABEL_KEY = 'sprintAnalyzer_serviceLabel'
 const MAX_RECENT_BOARDS = 5
 const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
 
@@ -197,6 +198,7 @@ function Dashboard({ credentials, onLogout }) {
   const [selectedBoard, setSelectedBoard] = useState(null)
   const [dateRange, setDateRange] = useState(null) // null = last 6 sprints default
   const [excludedSpaces, setExcludedSpaces] = useState([])
+  const [serviceLabel, setServiceLabel] = useState(null)
   const [metrics, setMetrics] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -204,11 +206,12 @@ function Dashboard({ credentials, onLogout }) {
   const [metricsCache, setMetricsCache] = useState({})
   const [lastFetched, setLastFetched] = useState(null)
 
-  // Load recent boards, cache, and excluded spaces from localStorage on mount
+  // Load recent boards, cache, excluded spaces, and service label from localStorage on mount
   useEffect(() => {
     setRecentBoards(loadFromStorage(RECENT_BOARDS_KEY, []))
     setMetricsCache(loadFromStorage(METRICS_CACHE_KEY, {}))
     setExcludedSpaces(loadFromStorage(EXCLUDED_SPACES_KEY, []))
+    setServiceLabel(loadFromStorage(SERVICE_LABEL_KEY, null))
   }, [])
 
   // Load boards list
@@ -216,7 +219,7 @@ function Dashboard({ credentials, onLogout }) {
     loadBoards()
   }, [])
 
-  // Load metrics when board, date range, or excluded spaces change
+  // Load metrics when board, date range, excluded spaces, or service label change
   useEffect(() => {
     if (selectedBoard) {
       loadMetrics(selectedBoard, false)
@@ -224,7 +227,7 @@ function Dashboard({ credentials, onLogout }) {
       setMetrics(null)
       setLastFetched(null)
     }
-  }, [selectedBoard, dateRange, excludedSpaces])
+  }, [selectedBoard, dateRange, excludedSpaces, serviceLabel])
 
   const loadBoards = async () => {
     try {
@@ -236,7 +239,7 @@ function Dashboard({ credentials, onLogout }) {
   }
 
   const loadMetrics = useCallback(async (boardId, forceRefresh = false) => {
-    // Build cache key including date range or sprint count and excluded spaces
+    // Build cache key including date range or sprint count, excluded spaces, and service label
     let rangeKey = 'default'
     if (dateRange) {
       if (dateRange.sprintCount) {
@@ -246,7 +249,8 @@ function Dashboard({ credentials, onLogout }) {
       }
     }
     const excludeKey = excludedSpaces.length > 0 ? `_excl_${excludedSpaces.sort().join('-')}` : ''
-    const cacheKey = `${boardId}_${rangeKey}${excludeKey}`
+    const serviceLabelKey = serviceLabel ? `_svc_${serviceLabel}` : ''
+    const cacheKey = `${boardId}_${rangeKey}${excludeKey}${serviceLabelKey}`
 
     // Check cache first (unless forcing refresh)
     if (!forceRefresh) {
@@ -262,7 +266,7 @@ function Dashboard({ credentials, onLogout }) {
     setError(null)
 
     try {
-      const data = await getMetricsSummary(credentials, boardId, excludedSpaces, dateRange)
+      const data = await getMetricsSummary(credentials, boardId, excludedSpaces, dateRange, serviceLabel)
       setMetrics(data)
 
       // Update cache with date-range-aware key
@@ -282,7 +286,7 @@ function Dashboard({ credentials, onLogout }) {
     } finally {
       setLoading(false)
     }
-  }, [credentials, metricsCache, dateRange, excludedSpaces])
+  }, [credentials, metricsCache, dateRange, excludedSpaces, serviceLabel])
 
   const updateRecentBoards = (boardId) => {
     const board = boards.find(b => b.id === boardId)
@@ -300,6 +304,11 @@ function Dashboard({ credentials, onLogout }) {
   const handleExcludedSpacesChange = (newExcluded) => {
     setExcludedSpaces(newExcluded)
     saveToStorage(EXCLUDED_SPACES_KEY, newExcluded)
+  }
+
+  const handleServiceLabelChange = (newLabel) => {
+    setServiceLabel(newLabel || null)
+    saveToStorage(SERVICE_LABEL_KEY, newLabel || null)
   }
 
   const handleRefresh = () => {
@@ -533,11 +542,36 @@ function Dashboard({ credentials, onLogout }) {
                   })()}
                 </div>
               </div>
-              <SpaceExclusionList
-                discoveredSpaces={metrics.alignment?.discoveredSpaces || []}
-                excludedSpaces={excludedSpaces}
-                onChange={handleExcludedSpacesChange}
-              />
+              <div style={{ display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                <SpaceExclusionList
+                  discoveredSpaces={metrics.alignment?.discoveredSpaces || []}
+                  excludedSpaces={excludedSpaces}
+                  onChange={handleExcludedSpacesChange}
+                />
+                {(metrics.alignment?.allLabels?.length > 0) && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <label style={{ fontSize: '13px', color: '#666', fontWeight: '500' }}>
+                      Service Label:
+                    </label>
+                    <select
+                      value={serviceLabel || ''}
+                      onChange={(e) => handleServiceLabelChange(e.target.value)}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: '4px',
+                        border: '1px solid #ddd',
+                        fontSize: '13px',
+                        minWidth: '150px'
+                      }}
+                    >
+                      <option value="">None (show all as business)</option>
+                      {metrics.alignment.allLabels.map(label => (
+                        <option key={label} value={label}>{label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
               <AlignmentChart
                 data={metrics.alignment?.sprints || []}
                 discoveredSpaces={(metrics.alignment?.discoveredSpaces || []).map(space => ({
@@ -545,6 +579,7 @@ function Dashboard({ credentials, onLogout }) {
                   isExcluded: excludedSpaces.includes(space.projectKey)
                 }))}
                 jiraServer={credentials.server}
+                serviceLabel={serviceLabel}
               />
             </div>
           </>

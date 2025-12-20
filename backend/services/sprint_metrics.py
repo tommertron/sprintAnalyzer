@@ -372,6 +372,28 @@ class SprintMetricsService:
             self._issues_cache[cache_key] = None
             return None
 
+    def _get_issue_labels(self, issue_key: str) -> list:
+        """Fetch an issue's labels.
+
+        Returns:
+            List of label strings
+        """
+        cache_key = f"labels_{issue_key}"
+        if cache_key in self._issues_cache:
+            return self._issues_cache[cache_key]
+
+        try:
+            data = self._request(
+                f"/rest/api/3/issue/{issue_key}",
+                params={"fields": "labels"}
+            )
+            labels = data.get("fields", {}).get("labels", [])
+            self._issues_cache[cache_key] = labels
+            return labels
+        except Exception:
+            self._issues_cache[cache_key] = []
+            return []
+
     def _get_initiative_from_parent(self, parent_key: str, is_subtask_parent: bool = False) -> Optional[dict]:
         """Traverse up from a parent to find the Initiative.
 
@@ -442,7 +464,7 @@ class SprintMetricsService:
 
         return results
 
-    def _calculate_alignment(self, sprints: list, sprint_issues: dict, excluded_spaces: list = None) -> dict:
+    def _calculate_alignment(self, sprints: list, sprint_issues: dict, excluded_spaces: list = None, service_label: str = None) -> dict:
         """Calculate strategic alignment metrics by finding the Initiative for each issue.
 
         Hierarchy handling:
@@ -456,6 +478,7 @@ class SprintMetricsService:
             sprints: List of sprint data
             sprint_issues: Dict mapping sprint ID to issues
             excluded_spaces: List of project keys to exclude from alignment calculations
+            service_label: Label that marks initiatives as "service" investment (optional)
         """
         excluded_spaces = excluded_spaces or []
         excluded_set = set(excluded_spaces)
@@ -553,9 +576,9 @@ class SprintMetricsService:
         discovered_spaces = {}
 
         # Aggregate points by sprint
-        sprint_totals = {}  # sprint_id -> {total, linked, orphan}
+        sprint_totals = {}  # sprint_id -> {total, linked, orphan, service, business}
         for sprint in sprints:
-            sprint_totals[sprint["id"]] = {"total": 0.0, "linked": 0.0, "orphan": 0.0}
+            sprint_totals[sprint["id"]] = {"total": 0.0, "linked": 0.0, "orphan": 0.0, "service": 0.0, "business": 0.0}
 
         # Also need to fetch epic details for the hierarchy
         # For regular issues: parent_key IS the epic
@@ -613,16 +636,27 @@ class SprintMetricsService:
 
                     init_key = initiative["key"]
                     if init_key not in discovered_spaces[project_key]["initiatives"]:
+                        # Fetch labels for this initiative
+                        init_labels = self._get_issue_labels(init_key)
                         discovered_spaces[project_key]["initiatives"][init_key] = {
                             "key": init_key,
                             "summary": initiative["summary"],
                             "issueType": initiative["issueType"],
                             "points": 0.0,
+                            "labels": init_labels,
                             "epics": {}  # epic_key -> {details, issues: []}
                         }
 
                     init_data = discovered_spaces[project_key]["initiatives"][init_key]
                     init_data["points"] += points
+
+                    # Track service vs business points based on labels
+                    is_service = service_label and service_label in init_data.get("labels", [])
+                    if project_key not in excluded_set:
+                        if is_service:
+                            sprint_totals[sprint_id]["service"] += points
+                        else:
+                            sprint_totals[sprint_id]["business"] += points
 
                     # Determine the epic key
                     if is_subtask:
@@ -715,6 +749,8 @@ class SprintMetricsService:
             total_points = totals["total"]
             linked_points = totals["linked"]
             orphan_points = totals["orphan"]
+            service_points = totals["service"]
+            business_points = totals["business"]
 
             linked_pct = (linked_points / total_points * 100) if total_points > 0 else 0
 
@@ -725,7 +761,9 @@ class SprintMetricsService:
                 "linkedToInitiative": round(linked_points, 1),
                 "orphanCount": round(orphan_points, 1),
                 "initiativeLinkedPercentage": round(linked_pct, 1),
-                "orphanPercentage": round(100 - linked_pct, 1)
+                "orphanPercentage": round(100 - linked_pct, 1),
+                "servicePoints": round(service_points, 1),
+                "businessPoints": round(business_points, 1)
             })
 
         # Convert discovered spaces for JSON serialization with full hierarchy
@@ -766,6 +804,7 @@ class SprintMetricsService:
                     "summary": init_data["summary"],
                     "issueType": init_data["issueType"],
                     "points": round(init_data["points"], 1),
+                    "labels": init_data.get("labels", []),
                     "epics": epics_list
                 })
             initiatives_list.sort(key=lambda x: x["points"], reverse=True)
@@ -778,10 +817,20 @@ class SprintMetricsService:
                 "initiatives": initiatives_list
             })
 
+        # Collect all unique labels from included initiatives
+        all_labels = set()
+        for space in spaces_list:
+            if not space["isExcluded"]:
+                for initiative in space["initiatives"]:
+                    for label in initiative.get("labels", []):
+                        all_labels.add(label)
+
         return {
             "sprints": sprint_alignment,
             "discoveredSpaces": sorted(spaces_list, key=lambda x: x["totalCount"], reverse=True),
-            "excludedSpaces": excluded_spaces
+            "excludedSpaces": excluded_spaces,
+            "allLabels": sorted(list(all_labels)),
+            "serviceLabel": service_label
         }
 
     def _calculate_coverage(self, sprints: list, sprint_issues: dict) -> dict:
@@ -845,10 +894,10 @@ class SprintMetricsService:
 
     def get_alignment_metrics(self, board_id: int, excluded_spaces: list = None,
                               start_date: str = None, end_date: str = None,
-                              sprint_count: int = None) -> dict:
+                              sprint_count: int = None, service_label: str = None) -> dict:
         """Calculate strategic alignment metrics."""
         sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
-        return self._calculate_alignment(sprints, sprint_issues, excluded_spaces)
+        return self._calculate_alignment(sprints, sprint_issues, excluded_spaces, service_label)
 
     def get_coverage_metrics(self, board_id: int,
                              start_date: str = None, end_date: str = None,
@@ -859,7 +908,7 @@ class SprintMetricsService:
 
     def get_all_metrics(self, board_id: int, excluded_spaces: list = None,
                         start_date: str = None, end_date: str = None,
-                        sprint_count: int = None) -> dict:
+                        sprint_count: int = None, service_label: str = None) -> dict:
         """Get all metrics combined for dashboard - single fetch, parallel processing."""
         # Single prefetch of all data
         sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
@@ -869,6 +918,6 @@ class SprintMetricsService:
             "velocity": self._calculate_velocity(sprints, sprint_issues),
             "completion": self._calculate_completion(sprints, sprint_issues),
             "quality": self._calculate_quality(sprints, sprint_issues),
-            "alignment": self._calculate_alignment(sprints, sprint_issues, excluded_spaces),
+            "alignment": self._calculate_alignment(sprints, sprint_issues, excluded_spaces, service_label),
             "coverage": self._calculate_coverage(sprints, sprint_issues)
         }

@@ -3,14 +3,16 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recha
 
 const COLORS = {
   linked: '#0052CC',
-  orphan: '#DFE1E6'
+  orphan: '#DFE1E6',
+  service: '#6554C0',
+  business: '#00875A'
 }
 
 const styles = {
   container: {
     display: 'flex',
+    flexDirection: 'column',
     gap: '24px',
-    alignItems: 'flex-start',
     marginTop: '16px'
   },
   chartWrapper: {
@@ -98,7 +100,7 @@ const styles = {
 }
 
 // Expandable hierarchy item component
-function HierarchyItem({ item, level, jiraServer, defaultExpanded = false }) {
+function HierarchyItem({ item, level, jiraServer, defaultExpanded = false, serviceLabel = null }) {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
   const hasChildren = (level === 'initiative' && item.epics?.length > 0) ||
@@ -118,6 +120,9 @@ function HierarchyItem({ item, level, jiraServer, defaultExpanded = false }) {
     child: item.issueType || 'Issue',
     imaginaryFriend: 'Sub-task'
   }
+
+  // Check if this initiative has the service investment label
+  const isServiceInvestment = level === 'initiative' && serviceLabel && item.labels?.includes(serviceLabel)
 
   return (
     <div style={styles.hierarchyItem}>
@@ -143,6 +148,19 @@ function HierarchyItem({ item, level, jiraServer, defaultExpanded = false }) {
         <span style={{ ...styles.issueType, borderColor: levelColors[level] }}>
           {levelLabels[level]}
         </span>
+        {isServiceInvestment && (
+          <span style={{
+            fontSize: '10px',
+            color: '#6554C0',
+            background: '#EAE6FF',
+            padding: '1px 6px',
+            borderRadius: '3px',
+            fontWeight: '500',
+            flexShrink: 0
+          }}>
+            Service Investment
+          </span>
+        )}
         <span style={styles.issueSummary} title={item.summary}>
           {item.summary}
         </span>
@@ -183,7 +201,7 @@ function HierarchyItem({ item, level, jiraServer, defaultExpanded = false }) {
   )
 }
 
-function AlignmentChart({ data, discoveredSpaces = [], jiraServer = '' }) {
+function AlignmentChart({ data, discoveredSpaces = [], jiraServer = '', serviceLabel = null }) {
   if (!data || data.length === 0) {
     return <div style={styles.noData}>No alignment data available</div>
   }
@@ -192,9 +210,11 @@ function AlignmentChart({ data, discoveredSpaces = [], jiraServer = '' }) {
   const totals = data.reduce(
     (acc, sprint) => ({
       linked: acc.linked + (sprint.linkedToInitiative || 0),
-      adHoc: acc.adHoc + (sprint.orphanCount || 0)
+      adHoc: acc.adHoc + (sprint.orphanCount || 0),
+      service: acc.service + (sprint.servicePoints || 0),
+      business: acc.business + (sprint.businessPoints || 0)
     }),
-    { linked: 0, adHoc: 0 }
+    { linked: 0, adHoc: 0, service: 0, business: 0 }
   )
 
   const total = totals.linked + totals.adHoc
@@ -207,10 +227,18 @@ function AlignmentChart({ data, discoveredSpaces = [], jiraServer = '' }) {
     { name: 'Ad-hoc', value: totals.adHoc, color: COLORS.orphan }
   ]
 
-  const CustomTooltip = ({ active, payload }) => {
+  // Service vs Business breakout pie data (only when service label is selected)
+  const hasServiceBreakout = serviceLabel && (totals.service > 0 || totals.business > 0)
+  const breakoutPieData = hasServiceBreakout ? [
+    { name: 'Service Investment', value: totals.service, color: COLORS.service },
+    { name: 'Business Projects', value: totals.business, color: COLORS.business }
+  ] : []
+  const breakoutTotal = totals.service + totals.business
+
+  const CustomTooltip = ({ active, payload, totalValue }) => {
     if (active && payload && payload.length) {
       const item = payload[0].payload
-      const percentage = ((item.value / total) * 100).toFixed(1)
+      const percentage = ((item.value / totalValue) * 100).toFixed(1)
       return (
         <div style={{
           background: 'white',
@@ -263,28 +291,62 @@ function AlignmentChart({ data, discoveredSpaces = [], jiraServer = '' }) {
 
   return (
     <div style={styles.container}>
-      <div style={styles.chartWrapper}>
-        <ResponsiveContainer width="100%" height={250}>
-          <PieChart>
-            <Pie
-              data={pieData}
-              cx="50%"
-              cy="50%"
-              labelLine={false}
-              label={renderCustomizedLabel}
-              outerRadius={100}
-              dataKey="value"
-            >
-              {pieData.map((entry, index) => (
-                <Cell key={`cell-${index}`} fill={entry.color} />
-              ))}
-            </Pie>
-            <Tooltip content={<CustomTooltip />} />
-            <Legend
-              formatter={(value) => <span style={{ color: '#333', fontSize: '13px' }}>{value}</span>}
-            />
-          </PieChart>
-        </ResponsiveContainer>
+      <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
+        <div style={styles.chartWrapper}>
+          <div style={{ fontSize: '12px', fontWeight: '600', color: '#666', textAlign: 'center', marginBottom: '8px', textTransform: 'uppercase' }}>
+            Overall Alignment
+          </div>
+          <ResponsiveContainer width="100%" height={250}>
+            <PieChart>
+              <Pie
+                data={pieData}
+                cx="50%"
+                cy="50%"
+                labelLine={false}
+                label={renderCustomizedLabel}
+                outerRadius={100}
+                dataKey="value"
+              >
+                {pieData.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={entry.color} />
+                ))}
+              </Pie>
+              <Tooltip content={<CustomTooltip totalValue={total} />} />
+              <Legend
+                formatter={(value) => <span style={{ color: '#333', fontSize: '13px' }}>{value}</span>}
+              />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+
+        {hasServiceBreakout && (
+          <div style={styles.chartWrapper}>
+            <div style={{ fontSize: '12px', fontWeight: '600', color: '#666', textAlign: 'center', marginBottom: '8px', textTransform: 'uppercase' }}>
+              Initiative Breakdown
+            </div>
+            <ResponsiveContainer width="100%" height={250}>
+              <PieChart>
+                <Pie
+                  data={breakoutPieData}
+                  cx="50%"
+                  cy="50%"
+                  labelLine={false}
+                  label={renderCustomizedLabel}
+                  outerRadius={100}
+                  dataKey="value"
+                >
+                  {breakoutPieData.map((entry, index) => (
+                    <Cell key={`cell-breakout-${index}`} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip content={<CustomTooltip totalValue={breakoutTotal} />} />
+                <Legend
+                  formatter={(value) => <span style={{ color: '#333', fontSize: '13px' }}>{value}</span>}
+                />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        )}
       </div>
 
       <div style={styles.breakdown}>
@@ -299,6 +361,7 @@ function AlignmentChart({ data, discoveredSpaces = [], jiraServer = '' }) {
                 item={init}
                 level="initiative"
                 jiraServer={jiraServer}
+                serviceLabel={serviceLabel}
               />
             ))}
             {allInitiatives.length > 15 && (

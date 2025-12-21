@@ -317,3 +317,68 @@ def get_summary(board_id):
         return jsonify({"data": summary})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/<int:board_id>/contributors", methods=["GET"])
+def get_contributors(board_id):
+    """Get per-person velocity metrics.
+
+    Query params:
+        - start_date: Optional ISO date (e.g., "2024-01-01")
+        - end_date: Optional ISO date (e.g., "2024-03-31")
+        - sprint_count: Optional number of sprints to include (default: 6)
+
+    Returns:
+        - Per-person average points per sprint
+        - Sprint breakdown for each contributor
+        - Team totals
+    """
+    server, email, token = get_jira_credentials()
+
+    if not server:
+        return jsonify({"error": "Missing Jira credentials in headers"}), 401
+
+    start_date, end_date = get_date_range()
+    sprint_count = get_sprint_count() or 6
+
+    try:
+        service = SprintMetricsService(server, email, token)
+        contributor_data = service.get_contributor_velocity(board_id, start_date, end_date, sprint_count)
+        return jsonify({"data": contributor_data})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/<int:board_id>/planning/<int:sprint_id>", methods=["GET"])
+def get_planning_metrics(board_id, sprint_id):
+    """Get planning metrics for a future/active sprint.
+
+    Query params:
+        - velocity_sprint_count: Number of past sprints to use for velocity average (default: 6)
+
+    Returns:
+        - Sprint info (name, dates, goal)
+        - Total story points
+        - Average points per story
+        - Stories with/without points
+        - Bug count and ratio
+        - Initiative-linked percentage
+        - Historical velocity comparison (over/under/on_target)
+    """
+    server, email, token = get_jira_credentials()
+
+    if not server:
+        return jsonify({"error": "Missing Jira credentials in headers"}), 401
+
+    velocity_sprint_count = request.args.get("velocity_sprint_count", 6, type=int)
+
+    try:
+        service = SprintMetricsService(server, email, token)
+        planning_data = service.get_planning_metrics(board_id, sprint_id, velocity_sprint_count)
+
+        if "error" in planning_data:
+            return jsonify({"error": planning_data["error"]}), 404
+
+        return jsonify({"data": planning_data})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500

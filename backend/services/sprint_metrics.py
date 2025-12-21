@@ -1,6 +1,6 @@
 """Sprint metrics calculation service."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -116,7 +116,7 @@ class SprintMetricsService:
         self._sprints_cache[cache_key] = result
         return result
 
-    def _get_sprint_issues(self, sprint_id: int) -> list:
+    def _get_sprint_issues(self, sprint_id: int, include_assignee: bool = False) -> list:
         """Get all issues in a sprint."""
         if sprint_id in self._issues_cache:
             return self._issues_cache[sprint_id]
@@ -125,7 +125,7 @@ class SprintMetricsService:
 
         base_fields = [
             "summary", "issuetype", "status", "resolution",
-            "created", "resolutiondate", "parent", "changelog"
+            "created", "resolutiondate", "parent", "changelog", "assignee"
         ]
         for sp_field in sp_fields:
             if sp_field not in base_fields:
@@ -394,6 +394,142 @@ class SprintMetricsService:
             self._issues_cache[cache_key] = []
             return []
 
+    def _batch_fetch_issue_details(self, issue_keys: set, fields: str = "summary,issuetype") -> dict:
+        """Batch fetch issue details in parallel.
+
+        Args:
+            issue_keys: Set of issue keys to fetch
+            fields: Comma-separated list of fields to retrieve
+
+        Returns:
+            Dict mapping issue_key to issue details
+        """
+        if not issue_keys:
+            return {}
+
+        results = {}
+        uncached = []
+        cache_prefix = f"details_{fields}_"
+
+        for key in issue_keys:
+            cache_key = f"{cache_prefix}{key}"
+            if cache_key in self._issues_cache:
+                results[key] = self._issues_cache[cache_key]
+            else:
+                uncached.append(key)
+
+        if not uncached:
+            return results
+
+        def fetch_issue(issue_key):
+            try:
+                data = self._request(
+                    f"/rest/api/3/issue/{issue_key}",
+                    params={"fields": fields}
+                )
+                result = {
+                    "key": issue_key,
+                    "summary": data.get("fields", {}).get("summary", ""),
+                    "issueType": data.get("fields", {}).get("issuetype", {}).get("name", "")
+                }
+                cache_key = f"{cache_prefix}{issue_key}"
+                self._issues_cache[cache_key] = result
+                return issue_key, result
+            except Exception:
+                result = {"key": issue_key, "summary": "", "issueType": "Unknown"}
+                return issue_key, result
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(fetch_issue, key): key for key in uncached}
+            for future in as_completed(futures):
+                issue_key, details = future.result()
+                results[issue_key] = details
+
+        return results
+
+    def _batch_fetch_labels(self, issue_keys: set) -> dict:
+        """Batch fetch labels for multiple issues in parallel.
+
+        Args:
+            issue_keys: Set of issue keys to fetch labels for
+
+        Returns:
+            Dict mapping issue_key to list of labels
+        """
+        if not issue_keys:
+            return {}
+
+        results = {}
+        uncached = []
+
+        for key in issue_keys:
+            cache_key = f"labels_{key}"
+            if cache_key in self._issues_cache:
+                results[key] = self._issues_cache[cache_key]
+            else:
+                uncached.append(key)
+
+        if not uncached:
+            return results
+
+        def fetch_labels(issue_key):
+            try:
+                data = self._request(
+                    f"/rest/api/3/issue/{issue_key}",
+                    params={"fields": "labels"}
+                )
+                labels = data.get("fields", {}).get("labels", [])
+                self._issues_cache[f"labels_{issue_key}"] = labels
+                return issue_key, labels
+            except Exception:
+                self._issues_cache[f"labels_{issue_key}"] = []
+                return issue_key, []
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(fetch_labels, key): key for key in uncached}
+            for future in as_completed(futures):
+                issue_key, labels = future.result()
+                results[issue_key] = labels
+
+        return results
+
+    def _batch_fetch_parents(self, issue_keys: set) -> dict:
+        """Batch fetch parent info for multiple issues in parallel.
+
+        Args:
+            issue_keys: Set of issue keys to fetch parents for
+
+        Returns:
+            Dict mapping issue_key to parent info (or None)
+        """
+        if not issue_keys:
+            return {}
+
+        results = {}
+        uncached = []
+
+        for key in issue_keys:
+            cache_key = f"parent_{key}"
+            if cache_key in self._issues_cache:
+                results[key] = self._issues_cache[cache_key]
+            else:
+                uncached.append(key)
+
+        if not uncached:
+            return results
+
+        def fetch_parent(issue_key):
+            parent = self._get_issue_parent(issue_key)
+            return issue_key, parent
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(fetch_parent, key): key for key in uncached}
+            for future in as_completed(futures):
+                issue_key, parent = future.result()
+                results[issue_key] = parent
+
+        return results
+
     def _get_initiative_from_parent(self, parent_key: str, is_subtask_parent: bool = False) -> Optional[dict]:
         """Traverse up from a parent to find the Initiative.
 
@@ -580,17 +716,23 @@ class SprintMetricsService:
         for sprint in sprints:
             sprint_totals[sprint["id"]] = {"total": 0.0, "linked": 0.0, "orphan": 0.0, "service": 0.0, "business": 0.0}
 
-        # Also need to fetch epic details for the hierarchy
-        # For regular issues: parent_key IS the epic
-        # For sub-tasks: need to get the story's parent (the epic)
+        # Collect all story parent keys that need parent lookups (for sub-tasks)
+        story_parent_keys = set()
+        for issue, points, parent_key, is_subtask, sprint_id in issues_to_process:
+            if parent_key and is_subtask:
+                story_parent_keys.add(parent_key)
+
+        # Batch fetch story parents in parallel to get epic keys
+        story_parents = self._batch_fetch_parents(story_parent_keys)
+
+        # Build story_to_epic mapping and collect all epic keys
         epic_keys_to_fetch = set()
         story_to_epic = {}  # For sub-tasks: story_key -> epic_key
 
         for issue, points, parent_key, is_subtask, sprint_id in issues_to_process:
             if parent_key:
                 if is_subtask:
-                    # parent_key is a Story, need to get Story's parent (Epic)
-                    story_parent = self._get_issue_parent(parent_key)
+                    story_parent = story_parents.get(parent_key)
                     if story_parent:
                         epic_key = story_parent["key"]
                         story_to_epic[parent_key] = epic_key
@@ -599,23 +741,24 @@ class SprintMetricsService:
                     # parent_key is already the Epic
                     epic_keys_to_fetch.add(parent_key)
 
-        # Batch fetch epic details
-        epic_details = {}
-        for epic_key in epic_keys_to_fetch:
-            details = self._get_issue_parent(epic_key)  # This gets us the epic's info from cache
-            # Actually we need the epic itself, not its parent. Let me fetch it directly.
-            try:
-                data = self._request(
-                    f"/rest/api/3/issue/{epic_key}",
-                    params={"fields": "summary,issuetype"}
-                )
-                epic_details[epic_key] = {
-                    "key": epic_key,
-                    "summary": data.get("fields", {}).get("summary", ""),
-                    "issueType": data.get("fields", {}).get("issuetype", {}).get("name", "")
-                }
-            except Exception:
-                epic_details[epic_key] = {"key": epic_key, "summary": "", "issueType": "Epic"}
+        # Batch fetch epic details in parallel
+        epic_details = self._batch_fetch_issue_details(epic_keys_to_fetch)
+
+        # Collect all initiative keys for label pre-fetching
+        initiative_keys = set()
+        for parent_key in parent_to_initiative:
+            init = parent_to_initiative[parent_key]
+            if init:
+                initiative_keys.add(init["key"])
+
+        # Batch fetch initiative labels in parallel
+        initiative_labels = self._batch_fetch_labels(initiative_keys)
+
+        # Collect all story keys for sub-task parents (for hierarchy display)
+        story_keys_for_details = set(story_to_epic.keys())
+
+        # Batch fetch story details in parallel
+        story_details = self._batch_fetch_issue_details(story_keys_for_details)
 
         # Process all issues and build full hierarchy
         for issue, points, parent_key, is_subtask, sprint_id in issues_to_process:
@@ -636,8 +779,8 @@ class SprintMetricsService:
 
                     init_key = initiative["key"]
                     if init_key not in discovered_spaces[project_key]["initiatives"]:
-                        # Fetch labels for this initiative
-                        init_labels = self._get_issue_labels(init_key)
+                        # Use pre-fetched labels
+                        init_labels = initiative_labels.get(init_key, [])
                         discovered_spaces[project_key]["initiatives"][init_key] = {
                             "key": init_key,
                             "summary": initiative["summary"],
@@ -690,27 +833,15 @@ class SprintMetricsService:
                         if is_subtask:
                             # This is an imaginary friend - add under its parent story
                             if story_key not in epic_data["children"]:
-                                # Need to fetch story details
-                                try:
-                                    story_data = self._request(
-                                        f"/rest/api/3/issue/{story_key}",
-                                        params={"fields": "summary,issuetype"}
-                                    )
-                                    epic_data["children"][story_key] = {
-                                        "key": story_key,
-                                        "summary": story_data.get("fields", {}).get("summary", ""),
-                                        "issueType": story_data.get("fields", {}).get("issuetype", {}).get("name", ""),
-                                        "points": 0.0,
-                                        "imaginaryFriends": []
-                                    }
-                                except Exception:
-                                    epic_data["children"][story_key] = {
-                                        "key": story_key,
-                                        "summary": "",
-                                        "issueType": "Story",
-                                        "points": 0.0,
-                                        "imaginaryFriends": []
-                                    }
+                                # Use pre-fetched story details
+                                story_info = story_details.get(story_key, {})
+                                epic_data["children"][story_key] = {
+                                    "key": story_key,
+                                    "summary": story_info.get("summary", ""),
+                                    "issueType": story_info.get("issueType", "Story"),
+                                    "points": 0.0,
+                                    "imaginaryFriends": []
+                                }
 
                             # Add sub-task to imaginary friends
                             epic_data["children"][story_key]["imaginaryFriends"].append({
@@ -870,6 +1001,160 @@ class SprintMetricsService:
             "fallbackAveragePoints": round(fallback_avg, 1)
         }
 
+    def _count_working_days(self, start_date: str, end_date: str) -> int:
+        """Count working days between two dates (excludes weekends).
+
+        Note: end_date is exclusive (sprint ends at start of that day,
+        so last working day is the day before).
+        """
+        if not start_date or not end_date:
+            return 10  # Default to 2 weeks
+
+        start = self._parse_date(start_date)
+        end = self._parse_date(end_date)
+
+        if not start or not end:
+            return 10
+
+        # Make dates timezone-naive for comparison
+        if hasattr(start, 'replace'):
+            start = start.replace(tzinfo=None)
+        if hasattr(end, 'replace'):
+            end = end.replace(tzinfo=None)
+
+        working_days = 0
+        current = start
+        # End date is exclusive (sprint ends at start of end date)
+        while current < end:
+            if current.weekday() < 5:  # Monday = 0, Friday = 4
+                working_days += 1
+            current += timedelta(days=1)
+
+        return working_days if working_days > 0 else 10
+
+    def _calculate_contributor_velocity(self, sprints: list, sprint_issues: dict) -> dict:
+        """Calculate per-person velocity metrics from prefetched data.
+
+        Returns average points completed per person per DAY, which helps
+        predict the impact of absences on sprint capacity regardless of
+        sprint length (handles 2-week vs 4-week sprints).
+        """
+        # Track points per person per sprint and sprint working days
+        # Structure: {accountId: {sprintId: points, ...}, ...}
+        contributor_sprints = {}
+        contributor_info = {}  # accountId -> {displayName, email, avatarUrl}
+        sprint_working_days = {}  # sprintId -> working days
+
+        # Calculate working days for each sprint
+        total_working_days = 0
+        for sprint in sprints:
+            days = self._count_working_days(sprint.get("startDate"), sprint.get("endDate"))
+            sprint_working_days[sprint["id"]] = days
+            total_working_days += days
+
+        for sprint in sprints:
+            issues = sprint_issues.get(sprint["id"], [])
+
+            for issue in issues:
+                if not self._is_completed(issue):
+                    continue
+
+                fields = issue.get("fields", {})
+                assignee = fields.get("assignee")
+
+                if not assignee or not assignee.get("accountId"):
+                    continue
+
+                account_id = assignee["accountId"]
+                points = self._get_story_points(issue)
+
+                if points is None:
+                    continue
+
+                # Initialize contributor tracking
+                if account_id not in contributor_sprints:
+                    contributor_sprints[account_id] = {}
+                    contributor_info[account_id] = {
+                        "accountId": account_id,
+                        "displayName": assignee.get("displayName", "Unknown"),
+                        "email": assignee.get("emailAddress"),
+                        "avatarUrl": assignee.get("avatarUrls", {}).get("48x48")
+                    }
+
+                # Add points for this sprint
+                sprint_id = sprint["id"]
+                if sprint_id not in contributor_sprints[account_id]:
+                    contributor_sprints[account_id][sprint_id] = 0
+                contributor_sprints[account_id][sprint_id] += points
+
+        # Calculate averages per contributor (normalized to per-day)
+        contributors = []
+        total_sprints = len(sprints)
+
+        for account_id, sprint_points in contributor_sprints.items():
+            # Sum all points across sprints
+            total_points = sum(sprint_points.values())
+
+            # Calculate working days this person was active
+            active_days = sum(
+                sprint_working_days.get(int(sid), 10)
+                for sid in sprint_points.keys()
+            )
+
+            # Count sprints where they contributed
+            sprints_active = len(sprint_points)
+
+            # Points per working day (normalized for variable sprint lengths)
+            points_per_day = total_points / active_days if active_days > 0 else 0
+
+            # Average per sprint (only counting sprints they were active)
+            avg_per_active_sprint = total_points / sprints_active if sprints_active > 0 else 0
+
+            # Average across ALL sprints (accounts for absence)
+            avg_per_sprint = total_points / total_sprints if total_sprints > 0 else 0
+
+            info = contributor_info[account_id]
+            contributors.append({
+                "accountId": account_id,
+                "displayName": info["displayName"],
+                "email": info["email"],
+                "avatarUrl": info["avatarUrl"],
+                "totalPoints": round(total_points, 1),
+                "sprintsActive": sprints_active,
+                "activeDays": active_days,
+                "pointsPerDay": round(points_per_day, 2),
+                "avgPointsPerActiveSprint": round(avg_per_active_sprint, 1),
+                "avgPointsPerSprint": round(avg_per_sprint, 1),
+                "sprintBreakdown": {
+                    str(sid): round(pts, 1)
+                    for sid, pts in sprint_points.items()
+                }
+            })
+
+        # Sort by points per day (descending)
+        contributors.sort(key=lambda x: x["pointsPerDay"], reverse=True)
+
+        # Calculate team totals
+        team_total_points = sum(c["totalPoints"] for c in contributors)
+        team_avg_velocity = team_total_points / total_sprints if total_sprints > 0 else 0
+        team_points_per_day = team_total_points / total_working_days if total_working_days > 0 else 0
+
+        return {
+            "contributors": contributors,
+            "totalSprints": total_sprints,
+            "totalWorkingDays": total_working_days,
+            "teamTotalPoints": round(team_total_points, 1),
+            "teamAvgVelocity": round(team_avg_velocity, 1),
+            "teamPointsPerDay": round(team_points_per_day, 2),
+            "sprintDetails": {
+                str(s["id"]): {
+                    "name": s["name"],
+                    "workingDays": sprint_working_days[s["id"]]
+                }
+                for s in sprints
+            }
+        }
+
     # Public methods - these can still be called individually if needed
     def get_velocity_metrics(self, board_id: int,
                              start_date: str = None, end_date: str = None,
@@ -906,6 +1191,17 @@ class SprintMetricsService:
         sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
         return self._calculate_coverage(sprints, sprint_issues)
 
+    def get_contributor_velocity(self, board_id: int,
+                                  start_date: str = None, end_date: str = None,
+                                  sprint_count: int = None) -> dict:
+        """Calculate per-person velocity metrics.
+
+        Returns average points completed per person per sprint, useful for
+        predicting impact of team member absences on sprint capacity.
+        """
+        sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
+        return self._calculate_contributor_velocity(sprints, sprint_issues)
+
     def get_all_metrics(self, board_id: int, excluded_spaces: list = None,
                         start_date: str = None, end_date: str = None,
                         sprint_count: int = None, service_label: str = None) -> dict:
@@ -920,4 +1216,137 @@ class SprintMetricsService:
             "quality": self._calculate_quality(sprints, sprint_issues),
             "alignment": self._calculate_alignment(sprints, sprint_issues, excluded_spaces, service_label),
             "coverage": self._calculate_coverage(sprints, sprint_issues)
+        }
+
+    def _get_sprint_by_id(self, sprint_id: int) -> Optional[dict]:
+        """Fetch a specific sprint by ID."""
+        try:
+            data = self._request(f"/rest/agile/1.0/sprint/{sprint_id}")
+            return data
+        except Exception:
+            return None
+
+    def get_planning_metrics(self, board_id: int, sprint_id: int,
+                             velocity_sprint_count: int = 6) -> dict:
+        """Calculate planning metrics for a future/active sprint.
+
+        Args:
+            board_id: Jira board ID
+            sprint_id: The sprint to analyze
+            velocity_sprint_count: Number of past sprints to use for velocity average
+
+        Returns:
+            Dict with planning metrics
+        """
+        # Get sprint details
+        sprint = self._get_sprint_by_id(sprint_id)
+        if not sprint:
+            return {"error": "Sprint not found"}
+
+        # Get issues in this sprint
+        issues = self._get_sprint_issues(sprint_id)
+
+        # Get historical velocity for comparison
+        historical_sprints, historical_issues = self._prefetch_all_data(
+            board_id, sprint_count=velocity_sprint_count
+        )
+        velocity_data = self._calculate_velocity(historical_sprints, historical_issues)
+        historical_velocity = velocity_data.get("averageVelocity", 0)
+
+        # Calculate planning metrics
+        total_points = 0.0
+        stories_with_points = 0
+        stories_missing_points = 0
+        stories_missing_points_list = []
+        bug_count = 0
+        total_story_count = 0
+        all_points = []
+
+        # Track parent keys for initiative linking
+        parent_info = {}
+        issues_to_check = []
+
+        for issue in issues:
+            fields = issue.get("fields", {})
+            issue_type = fields.get("issuetype", {}).get("name", "").lower()
+            is_subtask = fields.get("issuetype", {}).get("subtask", False)
+
+            # Count bugs
+            if "bug" in issue_type:
+                bug_count += 1
+
+            # Skip sub-tasks for point counting (handled by parent)
+            if is_subtask:
+                continue
+
+            total_story_count += 1
+            points = self._get_story_points(issue)
+
+            if points is not None:
+                total_points += points
+                stories_with_points += 1
+                all_points.append(points)
+            else:
+                stories_missing_points += 1
+                stories_missing_points_list.append({
+                    "key": issue.get("key"),
+                    "summary": fields.get("summary", ""),
+                    "issueType": fields.get("issuetype", {}).get("name", "")
+                })
+
+            # Track for initiative linking
+            parent = fields.get("parent")
+            if parent and parent.get("key"):
+                parent_key = parent.get("key")
+                parent_info[parent_key] = False  # Not a subtask parent
+                issues_to_check.append((issue, points or 0, parent_key))
+
+        # Calculate average points per story
+        avg_points = sum(all_points) / len(all_points) if all_points else 0
+
+        # Calculate velocity comparison
+        velocity_delta = total_points - historical_velocity
+        if velocity_delta > 2:
+            velocity_status = "over"
+        elif velocity_delta < -2:
+            velocity_status = "under"
+        else:
+            velocity_status = "on_target"
+
+        # Calculate initiative-linked percentage
+        parent_keys_info = [(key, is_sub) for key, is_sub in parent_info.items()]
+        parent_to_initiative = self._get_initiatives_batch(parent_keys_info)
+
+        linked_points = 0.0
+        for issue, points, parent_key in issues_to_check:
+            if parent_key and parent_to_initiative.get(parent_key):
+                linked_points += points
+
+        initiative_linked_pct = (linked_points / total_points * 100) if total_points > 0 else 0
+
+        # Calculate bug ratio
+        bug_ratio = (bug_count / total_story_count * 100) if total_story_count > 0 else 0
+
+        return {
+            "sprint": {
+                "id": sprint.get("id"),
+                "name": sprint.get("name"),
+                "state": sprint.get("state"),
+                "startDate": sprint.get("startDate"),
+                "endDate": sprint.get("endDate"),
+                "goal": sprint.get("goal")
+            },
+            "totalPoints": round(total_points, 1),
+            "averagePointsPerStory": round(avg_points, 1),
+            "storiesWithPoints": stories_with_points,
+            "storiesMissingPoints": stories_missing_points,
+            "storiesMissingPointsList": stories_missing_points_list,
+            "totalStories": total_story_count,
+            "bugCount": bug_count,
+            "bugRatio": round(bug_ratio, 1),
+            "initiativeLinkedPercent": round(initiative_linked_pct, 1),
+            "historicalVelocity": round(historical_velocity, 1),
+            "velocitySprintCount": velocity_sprint_count,
+            "velocityDelta": round(velocity_delta, 1),
+            "velocityStatus": velocity_status
         }

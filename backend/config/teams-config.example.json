@@ -1,12 +1,3 @@
 {
-  "teams": [
-    {
-      "boardId": "123",
-      "name": "Example Team 1"
-    },
-    {
-      "boardId": "456",
-      "name": "Example Team 2"
-    }
-  ]
+  "whitelistedBoardIds": ["123", "456"]
 }

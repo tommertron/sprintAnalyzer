@@ -2,6 +2,7 @@
 
 from flask import Blueprint, request, jsonify
 import requests
+from app import is_board_whitelisted
 
 bp = Blueprint("boards", __name__, url_prefix="/api/boards")
 
@@ -70,13 +71,14 @@ def list_boards():
 
             start_at += max_results
 
-        # Format response
+        # Format response with whitelist status
         formatted_boards = [
             {
                 "id": board["id"],
                 "name": board["name"],
                 "projectKey": board.get("location", {}).get("projectKey"),
-                "projectName": board.get("location", {}).get("displayName")
+                "projectName": board.get("location", {}).get("displayName"),
+                "isWhitelisted": is_board_whitelisted(board["id"])
             }
             for board in all_boards
         ]
@@ -120,8 +122,11 @@ def get_sprints(board_id):
         data = response.json()
         sprints = data.get("values", [])
 
-        # Sort by end date descending and take the most recent
-        sprints.sort(key=lambda s: s.get("endDate", ""), reverse=True)
+        # Sort based on state: closed sprints by endDate desc, future/active by startDate asc
+        if state == "future":
+            sprints.sort(key=lambda s: s.get("startDate", "") or "")
+        else:
+            sprints.sort(key=lambda s: s.get("endDate", ""), reverse=True)
         recent_sprints = sprints[:limit]
 
         # Format response

@@ -321,9 +321,11 @@ const styles = {
   }
 }
 
+// Parse date as local time to avoid timezone shift (e.g., Dec 25 showing as Dec 24)
 function formatDate(dateStr) {
   if (!dateStr) return ''
-  const date = new Date(dateStr)
+  const [year, month, day] = dateStr.split('T')[0].split('-').map(Number)
+  const date = new Date(year, month - 1, day)
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
@@ -335,8 +337,7 @@ function PlanningMetrics({
   onRefresh,
   capacityData,
   contributorVelocity,
-  capacityLoading,
-  isWhitelisted
+  capacityLoading
 }) {
   if (loading) {
     return <div style={styles.loading}>Loading planning metrics...</div>
@@ -547,93 +548,92 @@ function PlanningMetrics({
       </div>
 
       {/* Capacity Impact Section */}
-      {isWhitelisted && (
-        <>
-          {capacityLoading && (
-            <div style={styles.loading}>Loading capacity data...</div>
-          )}
+      {capacityLoading && (
+        <div style={styles.loading}>Loading capacity data...</div>
+      )}
 
-          {!capacityLoading && velocityImpact && (
-            <>
-              {/* Projected Velocity Card */}
-              <div style={styles.capacitySection}>
-                <div style={styles.capacityHeader}>
-                  <div>
-                    <div style={styles.capacityTitle}>Projected Sprint Velocity</div>
-                    <div style={styles.capacityValue}>{velocityImpact.projectedVelocity}</div>
-                    <div style={styles.capacitySubtext}>
-                      story points ({sprintWorkingDays} working days)
-                    </div>
-                  </div>
-                  <div style={styles.capacityBadge}>
-                    {velocityImpact.totalPointsLost + velocityImpact.holidayImpact > 0 ? (
-                      <>
-                        <span style={{ fontSize: '18px' }}>↓</span>
-                        <div>
-                          <div style={{ fontWeight: '600' }}>
-                            -{(velocityImpact.totalPointsLost + velocityImpact.holidayImpact).toFixed(1)} pts
-                          </div>
-                          <div style={{ fontSize: '11px', opacity: 0.8 }}>
-                            from {velocityImpact.expectedVelocity} expected
-                          </div>
-                        </div>
-                      </>
-                    ) : (
-                      <span>Full capacity</span>
-                    )}
-                  </div>
-                </div>
-                <div style={{ fontSize: '12px', opacity: 0.8 }}>
-                  Based on {velocityImpact.teamPointsPerDay} pts/day team average
+      {!capacityLoading && velocityImpact && (
+        <>
+          {/* Projected Velocity Card */}
+          <div style={styles.capacitySection}>
+            <div style={styles.capacityHeader}>
+              <div>
+                <div style={styles.capacityTitle}>Projected Sprint Velocity</div>
+                <div style={styles.capacityValue}>{velocityImpact.projectedVelocity}</div>
+                <div style={styles.capacitySubtext}>
+                  story points ({sprintWorkingDays} working days)
                 </div>
               </div>
+              <div style={styles.capacityBadge}>
+                {velocityImpact.totalPointsLost + velocityImpact.holidayImpact > 0 ? (
+                  <>
+                    <span style={{ fontSize: '18px' }}>↓</span>
+                    <div>
+                      <div style={{ fontWeight: '600' }}>
+                        -{(velocityImpact.totalPointsLost + velocityImpact.holidayImpact).toFixed(1)} pts
+                      </div>
+                      <div style={{ fontSize: '11px', opacity: 0.8 }}>
+                        from {velocityImpact.expectedVelocity} expected
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <span>Full capacity</span>
+                )}
+              </div>
+            </div>
+            <div style={{ fontSize: '12px', opacity: 0.8 }}>
+              Based on {velocityImpact.teamPointsPerDay} pts/day team average
+            </div>
+          </div>
 
-              {/* Team Members Away */}
-              {velocityImpact.impactDetails.length > 0 && (
-                <div style={styles.impactSection}>
-                  <div style={styles.impactTitle}>Team Members Away This Sprint</div>
-                  {velocityImpact.impactDetails.map((impact, idx) => (
-                    <div key={idx} style={styles.impactRow}>
-                      <div>
-                        <span style={styles.impactName}>{impact.name}</span>
-                        <span style={styles.impactDays}> - {impact.daysOff} day{impact.daysOff !== 1 ? 's' : ''} away</span>
-                      </div>
-                      <span style={styles.impactPoints}>-{impact.pointsLost} pts</span>
-                    </div>
-                  ))}
-                  {velocityImpact.holidayImpact > 0 && (
-                    <div style={styles.impactRow}>
-                      <div>
-                        <span style={styles.impactName}>Company Holidays</span>
-                        <span style={styles.impactDays}> - {capacityData?.holidays?.length} day{capacityData?.holidays?.length !== 1 ? 's' : ''}</span>
-                      </div>
-                      <span style={styles.impactPoints}>-{velocityImpact.holidayImpact} pts</span>
-                    </div>
-                  )}
+          {/* Team Members Away */}
+          {velocityImpact.impactDetails.length > 0 && (
+            <div style={styles.impactSection}>
+              <div style={styles.impactTitle}>Team Members Away This Sprint</div>
+              {velocityImpact.impactDetails.map((impact, idx) => (
+                <div key={idx} style={styles.impactRow}>
+                  <div>
+                    <span style={styles.impactName}>{impact.name}</span>
+                    <span style={styles.impactDays}> - {impact.daysOff} day{impact.daysOff !== 1 ? 's' : ''} away</span>
+                  </div>
+                  <span style={styles.impactPoints}>-{impact.pointsLost} pts</span>
+                </div>
+              ))}
+              {velocityImpact.holidayImpact > 0 && (
+                <div style={styles.impactRow}>
+                  <div>
+                    <span style={styles.impactName}>Company Holidays</span>
+                    <span style={styles.impactDays}> - {capacityData?.holidays?.length} day{capacityData?.holidays?.length !== 1 ? 's' : ''}</span>
+                  </div>
+                  <span style={styles.impactPoints}>-{velocityImpact.holidayImpact} pts</span>
                 </div>
               )}
-
-              {/* Holidays */}
-              {capacityData?.holidays?.length > 0 && (
-                <div style={styles.holidaySection}>
-                  <div style={styles.holidayTitle}>Company Holidays</div>
-                  {capacityData.holidays.map((holiday, idx) => (
-                    <div key={idx} style={styles.holidayItem}>
-                      <span>{holiday.name}</span>
-                      <span>{holiday.date}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
+            </div>
           )}
 
-          {!capacityLoading && !velocityImpact && (
-            <div style={styles.setupPrompt}>
-              <strong>Capacity planning not configured.</strong> Go to the Capacity tab to select team members and connect BambooHR to see velocity impact from time off.
+          {/* Holidays */}
+          {capacityData?.holidays?.length > 0 && (
+            <div style={styles.holidaySection}>
+              <div style={styles.holidayTitle}>Company Holidays</div>
+              {capacityData.holidays.map((holiday, idx) => (
+                <div key={idx} style={styles.holidayItem}>
+                  <span>{holiday.name}</span>
+                  <span>
+                    {formatDate(holiday.date)}
+                    {holiday.endDate && holiday.endDate !== holiday.date && ` - ${formatDate(holiday.endDate)}`}
+                  </span>
+                </div>
+              ))}
             </div>
           )}
         </>
+      )}
+
+      {!capacityLoading && !velocityImpact && (
+        <div style={styles.setupPrompt}>
+          <strong>Capacity planning not configured.</strong> Go to the Capacity tab to select team members and connect BambooHR to see velocity impact from time off.
+        </div>
       )}
 
       {/* Stories missing points section */}

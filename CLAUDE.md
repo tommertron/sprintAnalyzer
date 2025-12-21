@@ -138,24 +138,9 @@ Backend expects (or uses atlassian-helper config fallback):
 Frontend uses `.env` for:
 - `VITE_API_URL` - Backend API URL (defaults to /api in dev proxy)
 
-## Whitelisted Teams
+## BambooHR Integration
 
-Teams eligible for vacation/capacity features are configured in `backend/config/teams-config.json`:
-
-```json
-{
-  "teams": [
-    {"boardId": "123", "name": "Platform Team"},
-    {"boardId": "456", "name": "Mobile Team"}
-  ]
-}
-```
-
-Copy from `teams-config.example.json` and configure for your org.
-
-## Future: BambooHR Integration
-
-BambooHR integration for vacation/capacity planning is planned for Phase 2. Will add:
-- `backend/app/api/bamboo.py` - Time-off endpoints
+BambooHR integration provides vacation/capacity planning features:
+- `backend/app/api/bamboo.py` - Time-off and capacity endpoints
 - `backend/services/bamboo_client.py` - BambooHR API client
-- Employee-to-Jira user matching logic
+- Team member management with Jira user search

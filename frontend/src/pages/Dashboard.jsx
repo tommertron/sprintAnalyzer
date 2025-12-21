@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { getBoards, getMetricsSummary, getFutureSprints, getActiveSprint, getPlanningMetrics, getCapacity, getContributorVelocity, getProjectMembers } from '../services/api'
 import BoardSelector from '../components/BoardSelector'
 import DateRangeSelector from '../components/DateRangeSelector'
@@ -11,6 +11,7 @@ import AlignmentChart from '../components/AlignmentChart'
 import SprintSelector from '../components/SprintSelector'
 import PlanningMetrics from '../components/PlanningMetrics'
 import CapacityPlanning from '../components/CapacityPlanning'
+import LoadingStatusModal from '../components/LoadingStatusModal'
 
 const RECENT_BOARDS_KEY = 'sprintAnalyzer_recentBoards'
 const METRICS_CACHE_KEY = 'sprintAnalyzer_metricsCache'
@@ -177,14 +178,17 @@ const styles = {
     color: '#DE350B',
     marginBottom: '16px'
   },
+  tabContainer: {
+    marginBottom: '24px'
+  },
   tabs: {
     display: 'flex',
     gap: '0',
-    marginBottom: '24px'
+    borderBottom: '1px solid #ddd'
   },
   tab: {
     padding: '12px 24px',
-    background: 'white',
+    background: '#f5f5f5',
     border: '1px solid #ddd',
     borderBottom: 'none',
     cursor: 'pointer',
@@ -192,7 +196,9 @@ const styles = {
     fontWeight: '500',
     color: '#666',
     marginRight: '-1px',
-    position: 'relative'
+    marginBottom: '-1px',
+    position: 'relative',
+    transition: 'background 0.15s, color 0.15s'
   },
   tabFirst: {
     borderTopLeftRadius: '8px'
@@ -203,17 +209,16 @@ const styles = {
   tabActive: {
     background: 'white',
     color: '#0052CC',
-    borderBottom: '2px solid white',
-    marginBottom: '-1px',
-    zIndex: 1
+    zIndex: 1,
+    borderBottomColor: 'white'
   },
   tabContent: {
     background: 'white',
-    borderRadius: '0 8px 8px 8px',
-    padding: '20px',
-    boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+    borderRadius: '0 0 8px 8px',
     border: '1px solid #ddd',
-    marginTop: '-1px'
+    borderTop: 'none',
+    padding: '20px',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
   },
   planningControls: {
     display: 'flex',
@@ -251,6 +256,7 @@ function Dashboard({ credentials, onLogout }) {
   const [serviceLabel, setServiceLabel] = useState(null)
   const [metrics, setMetrics] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [showLoadingModal, setShowLoadingModal] = useState(false)
   const [error, setError] = useState(null)
   const [recentBoards, setRecentBoards] = useState([])
   const [metricsCache, setMetricsCache] = useState({})
@@ -272,6 +278,9 @@ function Dashboard({ credentials, onLogout }) {
   const [contributorVelocity, setContributorVelocity] = useState(null)
   const [capacityLoading, setCapacityLoading] = useState(false)
   const [projectMembers, setProjectMembers] = useState([])
+
+  // Ref to track sprint that was just loaded by the main planning effect
+  const lastLoadedSprintRef = useRef(null)
 
   // Load recent boards, cache, excluded spaces, and service label from localStorage on mount
   useEffect(() => {
@@ -331,6 +340,9 @@ function Dashboard({ credentials, onLogout }) {
 
     setLoading(true)
     setError(null)
+    if (forceRefresh) {
+      setShowLoadingModal(true)
+    }
 
     try {
       const data = await getMetricsSummary(credentials, boardId, excludedSpaces, dateRange, serviceLabel)
@@ -352,6 +364,7 @@ function Dashboard({ credentials, onLogout }) {
       setError('Failed to load metrics')
     } finally {
       setLoading(false)
+      setShowLoadingModal(false)
     }
   }, [credentials, metricsCache, dateRange, excludedSpaces, serviceLabel])
 
@@ -521,26 +534,174 @@ function Dashboard({ credentials, onLogout }) {
     }
   }, [credentials])
 
-  // Load sprints and project members when switching to planning tab or when board changes
+  // Load all planning tab data in a single coordinated effect
   useEffect(() => {
-    if (activeTab === 'planning' && selectedBoard) {
-      loadAvailableSprints(selectedBoard)
-      loadProjectMembers(selectedBoard)
-      loadContributorVelocity(selectedBoard)
-    }
-  }, [activeTab, selectedBoard, loadAvailableSprints, loadProjectMembers, loadContributorVelocity])
+    if (activeTab !== 'planning' || !selectedBoard) return
 
-  // Load planning metrics and capacity when sprint selection changes
-  useEffect(() => {
-    if (activeTab === 'planning' && selectedBoard && selectedSprint) {
-      loadPlanningMetrics(selectedBoard, selectedSprint)
-      // Load capacity data for the selected sprint
-      const sprint = availableSprints.find(s => s.id === selectedSprint)
-      if (sprint && projectMembers.length > 0) {
-        loadCapacityData(selectedBoard, sprint)
+    let cancelled = false
+
+    const loadPlanningTabData = async () => {
+      // Load sprints, members, and contributor velocity in parallel
+      const [activeSprints, futureSprints, members, contribVelocity] = await Promise.all([
+        getActiveSprint(credentials, selectedBoard).catch(() => []),
+        getFutureSprints(credentials, selectedBoard).catch(() => []),
+        getProjectMembers(credentials, selectedBoard).catch(() => []),
+        getContributorVelocity(credentials, selectedBoard, 6).catch(() => null)
+      ])
+
+      if (cancelled) return
+
+      const allSprints = [...activeSprints, ...futureSprints]
+      setAvailableSprints(allSprints)
+
+      const activeMembers = members.filter(m =>
+        !m.displayName?.toLowerCase().includes('former user')
+      )
+      setProjectMembers(activeMembers)
+      setContributorVelocity(contribVelocity)
+
+      // Auto-select active sprint if none selected
+      let sprintToSelect = selectedSprint
+      if (!sprintToSelect && activeSprints.length > 0) {
+        sprintToSelect = activeSprints[0].id
+        setSelectedSprint(sprintToSelect)
+      } else if (!sprintToSelect && allSprints.length > 0) {
+        sprintToSelect = allSprints[0].id
+        setSelectedSprint(sprintToSelect)
+      }
+
+      // Now load sprint-specific data if we have a sprint
+      if (sprintToSelect) {
+        const sprint = allSprints.find(s => s.id === sprintToSelect)
+        lastLoadedSprintRef.current = sprintToSelect
+        await loadSprintData(sprintToSelect, sprint, activeMembers)
       }
     }
-  }, [activeTab, selectedBoard, selectedSprint, velocitySprintCount, loadPlanningMetrics, availableSprints, projectMembers, loadCapacityData])
+
+    const loadSprintData = async (sprintId, sprint, members) => {
+      if (cancelled) return
+
+      setPlanningLoading(true)
+      setCapacityLoading(true)
+
+      try {
+        // Load planning metrics
+        const metricsData = await getPlanningMetrics(credentials, selectedBoard, sprintId, velocitySprintCount)
+        if (!cancelled) setPlanningMetrics(metricsData)
+      } catch (err) {
+        if (!cancelled) setPlanningMetrics(null)
+      } finally {
+        if (!cancelled) setPlanningLoading(false)
+      }
+
+      // Load capacity data if configured
+      const bambooCredentials = loadFromStorage(BAMBOO_CREDENTIALS_KEY, null)
+      const selectedMemberIds = loadFromStorage(`${SELECTED_MEMBERS_KEY}_${selectedBoard}`, [])
+
+      if (bambooCredentials && selectedMemberIds.length > 0 && sprint) {
+        const memberEmails = members
+          .filter(m => selectedMemberIds.includes(m.accountId) && m.email)
+          .map(m => m.email)
+
+        if (memberEmails.length > 0) {
+          try {
+            const capacityResult = await getCapacity(
+              credentials,
+              bambooCredentials,
+              selectedBoard,
+              sprint.startDate?.split('T')[0],
+              sprint.endDate?.split('T')[0],
+              memberEmails,
+              selectedMemberIds.length
+            )
+            if (!cancelled) setCapacityData(capacityResult)
+          } catch (err) {
+            if (!cancelled) setCapacityData(null)
+          }
+        } else {
+          if (!cancelled) setCapacityData(null)
+        }
+      } else {
+        if (!cancelled) setCapacityData(null)
+      }
+
+      if (!cancelled) setCapacityLoading(false)
+    }
+
+    setSprintsLoading(true)
+    loadPlanningTabData().finally(() => {
+      if (!cancelled) setSprintsLoading(false)
+    })
+
+    return () => { cancelled = true }
+  }, [activeTab, selectedBoard, credentials, velocitySprintCount])
+
+  // Load sprint-specific data when sprint selection changes (user picks different sprint)
+  useEffect(() => {
+    if (activeTab !== 'planning' || !selectedBoard || !selectedSprint || availableSprints.length === 0) return
+
+    // Skip if this sprint was just loaded by the main planning effect
+    if (lastLoadedSprintRef.current === selectedSprint) {
+      lastLoadedSprintRef.current = null // Reset so future changes work
+      return
+    }
+
+    const sprint = availableSprints.find(s => s.id === selectedSprint)
+    if (!sprint) return
+
+    let cancelled = false
+
+    const loadSprintSpecificData = async () => {
+      setPlanningLoading(true)
+      setCapacityLoading(true)
+
+      try {
+        const metricsData = await getPlanningMetrics(credentials, selectedBoard, selectedSprint, velocitySprintCount)
+        if (!cancelled) setPlanningMetrics(metricsData)
+      } catch (err) {
+        if (!cancelled) setPlanningMetrics(null)
+      } finally {
+        if (!cancelled) setPlanningLoading(false)
+      }
+
+      // Load capacity data if configured
+      const bambooCredentials = loadFromStorage(BAMBOO_CREDENTIALS_KEY, null)
+      const selectedMemberIds = loadFromStorage(`${SELECTED_MEMBERS_KEY}_${selectedBoard}`, [])
+
+      if (bambooCredentials && selectedMemberIds.length > 0 && projectMembers.length > 0) {
+        const memberEmails = projectMembers
+          .filter(m => selectedMemberIds.includes(m.accountId) && m.email)
+          .map(m => m.email)
+
+        if (memberEmails.length > 0) {
+          try {
+            const capacityResult = await getCapacity(
+              credentials,
+              bambooCredentials,
+              selectedBoard,
+              sprint.startDate?.split('T')[0],
+              sprint.endDate?.split('T')[0],
+              memberEmails,
+              selectedMemberIds.length
+            )
+            if (!cancelled) setCapacityData(capacityResult)
+          } catch (err) {
+            if (!cancelled) setCapacityData(null)
+          }
+        } else {
+          if (!cancelled) setCapacityData(null)
+        }
+      } else {
+        if (!cancelled) setCapacityData(null)
+      }
+
+      if (!cancelled) setCapacityLoading(false)
+    }
+
+    loadSprintSpecificData()
+
+    return () => { cancelled = true }
+  }, [selectedSprint])
 
   // Reset planning state when board changes
   useEffect(() => {
@@ -615,72 +776,76 @@ function Dashboard({ credentials, onLogout }) {
 
         {error && <div style={styles.error}>{error}</div>}
 
-        {/* Tab Navigation */}
+        {/* Tab Navigation and Content */}
         {selectedBoard && (
-          <div style={styles.tabs}>
-            <button
-              style={{
-                ...styles.tab,
-                ...styles.tabFirst,
-                ...(activeTab === 'metrics' ? styles.tabActive : {})
-              }}
-              onClick={() => setActiveTab('metrics')}
-            >
-              Metrics
-            </button>
-            <button
-              style={{
-                ...styles.tab,
-                ...(activeTab === 'planning' ? styles.tabActive : {})
-              }}
-              onClick={() => setActiveTab('planning')}
-            >
-              Planning
-            </button>
-            <button
-              style={{
-                ...styles.tab,
-                ...styles.tabLast,
-                ...(activeTab === 'capacity' ? styles.tabActive : {})
-              }}
-              onClick={() => setActiveTab('capacity')}
-            >
-              Capacity
-            </button>
-          </div>
-        )}
-
-        {/* Metrics Tab Content */}
-        {activeTab === 'metrics' && loading && <div style={styles.loading}>Loading metrics...</div>}
-
-        {activeTab === 'metrics' && metrics && !loading && (
-          <>
-            <div style={styles.metricsHeader}>
-              <span style={styles.metricsTitle}>
-                Sprint Metrics
-                {lastFetched && (
-                  <span style={styles.cacheInfo}>
-                    Updated {formatLastFetched()}
-                  </span>
-                )}
-              </span>
+          <div style={styles.tabContainer}>
+            <div style={styles.tabs}>
               <button
                 style={{
-                  ...styles.refreshBtn,
-                  ...(loading ? styles.refreshBtnDisabled : {})
+                  ...styles.tab,
+                  ...styles.tabFirst,
+                  ...(activeTab === 'metrics' ? styles.tabActive : {})
                 }}
-                onClick={handleRefresh}
-                disabled={loading}
-                title="Refresh metrics"
+                onClick={() => setActiveTab('metrics')}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
-                </svg>
-                Refresh
+                Metrics
+              </button>
+              <button
+                style={{
+                  ...styles.tab,
+                  ...(activeTab === 'planning' ? styles.tabActive : {})
+                }}
+                onClick={() => setActiveTab('planning')}
+              >
+                Planning
+              </button>
+              <button
+                style={{
+                  ...styles.tab,
+                  ...styles.tabLast,
+                  ...(activeTab === 'capacity' ? styles.tabActive : {})
+                }}
+                onClick={() => setActiveTab('capacity')}
+              >
+                Capacity
               </button>
             </div>
 
-            <div style={styles.metricsGrid}>
+            {/* Metrics Tab Content */}
+            {activeTab === 'metrics' && (
+              <div style={styles.tabContent}>
+                {showLoadingModal && <LoadingStatusModal isOpen={showLoadingModal} />}
+
+                {loading && !showLoadingModal && <div style={styles.loading}>Loading metrics...</div>}
+
+                {metrics && !loading && !showLoadingModal && (
+                  <>
+                    <div style={styles.metricsHeader}>
+                      <span style={styles.metricsTitle}>
+                        Sprint Metrics
+                        {lastFetched && (
+                          <span style={styles.cacheInfo}>
+                            Updated {formatLastFetched()}
+                          </span>
+                        )}
+                      </span>
+                      <button
+                        style={{
+                          ...styles.refreshBtn,
+                          ...(loading ? styles.refreshBtnDisabled : {})
+                        }}
+                        onClick={handleRefresh}
+                        disabled={loading}
+                        title="Refresh metrics"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+                        </svg>
+                        Refresh
+                      </button>
+                    </div>
+
+                    <div style={styles.metricsGrid}>
               <MetricCard
                 title="Average Velocity"
                 value={metrics.velocity?.averageVelocity || 0}
@@ -852,59 +1017,61 @@ function Dashboard({ credentials, onLogout }) {
                 serviceLabel={serviceLabel}
               />
             </div>
-          </>
-        )}
-
-        {/* Planning Tab Content */}
-        {activeTab === 'planning' && selectedBoard && (
-          <div style={styles.tabContent}>
-            <div style={styles.planningControls}>
-              <SprintSelector
-                sprints={availableSprints}
-                selectedSprint={selectedSprint}
-                onSelect={setSelectedSprint}
-                loading={sprintsLoading}
-              />
-            </div>
-
-            {planningLoading && <div style={styles.loading}>Loading planning metrics...</div>}
-
-            {!planningLoading && selectedSprint && planningMetrics && (
-              <PlanningMetrics
-                metrics={planningMetrics}
-                loading={planningLoading}
-                velocitySprintCount={velocitySprintCount}
-                onVelocityCountChange={setVelocitySprintCount}
-                onRefresh={handlePlanningRefresh}
-                capacityData={capacityData}
-                contributorVelocity={contributorVelocity}
-                capacityLoading={capacityLoading}
-                isWhitelisted={boards.find(b => b.id === selectedBoard)?.isWhitelisted || false}
-              />
-            )}
-
-            {!planningLoading && !selectedSprint && availableSprints.length === 0 && !sprintsLoading && (
-              <div style={styles.loading}>
-                No upcoming sprints found for this board
+                  </>
+                )}
               </div>
             )}
 
-            {!planningLoading && !selectedSprint && availableSprints.length > 0 && (
-              <div style={styles.loading}>
-                Select a sprint to view planning metrics
+            {/* Planning Tab Content */}
+            {activeTab === 'planning' && (
+              <div style={styles.tabContent}>
+                <div style={styles.planningControls}>
+                  <SprintSelector
+                    sprints={availableSprints}
+                    selectedSprint={selectedSprint}
+                    onSelect={setSelectedSprint}
+                    loading={sprintsLoading}
+                  />
+                </div>
+
+                {planningLoading && <div style={styles.loading}>Loading planning metrics...</div>}
+
+                {!planningLoading && selectedSprint && planningMetrics && (
+                  <PlanningMetrics
+                    metrics={planningMetrics}
+                    loading={planningLoading}
+                    velocitySprintCount={velocitySprintCount}
+                    onVelocityCountChange={setVelocitySprintCount}
+                    onRefresh={handlePlanningRefresh}
+                    capacityData={capacityData}
+                    contributorVelocity={contributorVelocity}
+                    capacityLoading={capacityLoading}
+                  />
+                )}
+
+                {!planningLoading && !selectedSprint && availableSprints.length === 0 && !sprintsLoading && (
+                  <div style={styles.loading}>
+                    No upcoming sprints found for this board
+                  </div>
+                )}
+
+                {!planningLoading && !selectedSprint && availableSprints.length > 0 && (
+                  <div style={styles.loading}>
+                    Select a sprint to view planning metrics
+                  </div>
+                )}
               </div>
             )}
-          </div>
-        )}
 
-        {/* Capacity Tab Content */}
-        {activeTab === 'capacity' && selectedBoard && (
-          <div style={styles.tabContent}>
-            <CapacityPlanning
-              credentials={credentials}
-              boardId={selectedBoard}
-              isWhitelisted={boards.find(b => b.id === selectedBoard)?.isWhitelisted || false}
-            />
+            {/* Capacity Tab Content */}
+            {activeTab === 'capacity' && (
+              <div style={styles.tabContent}>
+                <CapacityPlanning
+                  credentials={credentials}
+                  boardId={selectedBoard}
+                />
+              </div>
+            )}
           </div>
         )}
 

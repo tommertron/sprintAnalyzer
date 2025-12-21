@@ -216,6 +216,17 @@ export async function getProjectMembers(credentials, boardId) {
 }
 
 /**
+ * Search for Jira users by name or email
+ */
+export async function searchJiraUsers(credentials, query) {
+  const client = createClient(credentials)
+  const response = await client.get('/bamboo/search-users', {
+    params: { query }
+  })
+  return response.data.data.users
+}
+
+/**
  * Get company holidays from BambooHR
  */
 export async function getHolidays(jiraCredentials, bambooCredentials, startDate, endDate) {

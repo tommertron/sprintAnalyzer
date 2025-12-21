@@ -2,7 +2,6 @@
 
 from flask import Blueprint, request, jsonify
 import requests
-from app import is_board_whitelisted
 
 bp = Blueprint("boards", __name__, url_prefix="/api/boards")
 
@@ -33,7 +32,7 @@ def make_jira_request(server, email, token, endpoint, params=None):
 
 @bp.route("", methods=["GET"])
 def list_boards():
-    """List all Scrum boards accessible to the user.
+    """List all boards accessible to the user.
 
     Requires headers:
         - X-Jira-Server: Jira server URL
@@ -55,7 +54,7 @@ def list_boards():
             response = make_jira_request(
                 server, email, token,
                 "/rest/agile/1.0/board",
-                params={"startAt": start_at, "maxResults": max_results, "type": "scrum"}
+                params={"startAt": start_at, "maxResults": max_results}
             )
 
             if response.status_code != 200:
@@ -71,14 +70,14 @@ def list_boards():
 
             start_at += max_results
 
-        # Format response with whitelist status
+        # Format response
         formatted_boards = [
             {
                 "id": board["id"],
                 "name": board["name"],
+                "type": board.get("type", "unknown"),
                 "projectKey": board.get("location", {}).get("projectKey"),
                 "projectName": board.get("location", {}).get("displayName"),
-                "isWhitelisted": is_board_whitelisted(board["id"])
             }
             for board in all_boards
         ]

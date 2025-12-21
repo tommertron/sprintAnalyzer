@@ -4,7 +4,6 @@ Uses user-provided credentials via headers (similar to Jira auth).
 """
 
 from flask import Blueprint, request, jsonify
-from app import is_board_whitelisted
 from services import bamboo_client
 from services.atlassian_teams import get_team_member_emails, get_user_teams
 
@@ -24,6 +23,80 @@ def get_jira_credentials():
     email = request.headers.get("X-Jira-Email")
     token = request.headers.get("X-Jira-Token")
     return server, email, token
+
+
+@bp.route("/search-users", methods=["GET"])
+def search_jira_users():
+    """Search for Jira users by name or email.
+
+    Headers:
+        - X-Jira-Server, X-Jira-Email, X-Jira-Token: Jira credentials
+
+    Query params:
+        - query: Search string (required, min 2 chars)
+
+    Returns:
+        - List of matching users with accountId, displayName, email, avatarUrl
+    """
+    import requests as req
+
+    jira_server, jira_email, jira_token = get_jira_credentials()
+
+    if not jira_server or not jira_email or not jira_token:
+        return jsonify({
+            "error": "Missing Jira credentials",
+            "data": {"users": []}
+        }), 401
+
+    query = request.args.get("query", "").strip()
+    if len(query) < 2:
+        return jsonify({
+            "error": "Query must be at least 2 characters",
+            "data": {"users": []}
+        }), 400
+
+    try:
+        # Use Jira user search API
+        response = req.get(
+            f"{jira_server}/rest/api/3/user/search",
+            auth=(jira_email, jira_token),
+            headers={"Accept": "application/json"},
+            params={"query": query, "maxResults": 20},
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            return jsonify({
+                "error": f"Jira API error: {response.status_code}",
+                "data": {"users": []}
+            }), 500
+
+        users = response.json()
+
+        # Format response - filter out inactive/former users
+        formatted_users = []
+        for user in users:
+            display_name = user.get("displayName", "")
+            # Skip former/inactive users
+            if "former user" in display_name.lower():
+                continue
+            if not user.get("active", True):
+                continue
+
+            formatted_users.append({
+                "accountId": user.get("accountId"),
+                "displayName": display_name,
+                "email": user.get("emailAddress"),
+                "avatarUrl": user.get("avatarUrls", {}).get("48x48")
+            })
+
+        return jsonify({"data": {"users": formatted_users}})
+
+    except Exception as e:
+        return jsonify({
+            "error": f"Failed to search users: {str(e)}",
+            "data": {"users": []}
+        }), 500
 
 
 @bp.route("/holidays", methods=["GET"])
@@ -262,7 +335,7 @@ def debug_teams():
 
 @bp.route("/time-off/<int:board_id>", methods=["GET"])
 def get_team_time_off(board_id):
-    """Get time-off data for a team (whitelisted teams only).
+    """Get time-off data for a team.
 
     Headers:
         - X-Bamboo-Token: User's BambooHR API key
@@ -275,15 +348,8 @@ def get_team_time_off(board_id):
         - team_id: Atlassian Team ID to filter by
 
     Returns:
-        - 403 if board is not whitelisted
-        - Time-off entries for team members if whitelisted
+        - Time-off entries for team members
     """
-    if not is_board_whitelisted(board_id):
-        return jsonify({
-            "error": "Time-off data only available for whitelisted teams",
-            "data": {"timeOff": []}
-        }), 403
-
     token, subdomain = get_bamboo_credentials()
     if not token or not subdomain:
         return jsonify({
@@ -343,7 +409,7 @@ def get_employees():
 
 @bp.route("/capacity/<int:board_id>", methods=["GET"])
 def get_capacity(board_id):
-    """Calculate capacity adjustment for upcoming sprint (whitelisted teams only).
+    """Calculate capacity adjustment for upcoming sprint.
 
     Headers:
         - X-Bamboo-Token: User's BambooHR API key
@@ -358,14 +424,7 @@ def get_capacity(board_id):
 
     Returns:
         - Capacity adjustment factor and breakdown
-        - 403 if board is not whitelisted
     """
-    if not is_board_whitelisted(board_id):
-        return jsonify({
-            "error": "Capacity planning only available for whitelisted teams",
-            "data": {"adjustmentFactor": 1.0}
-        }), 403
-
     token, subdomain = get_bamboo_credentials()
     if not token or not subdomain:
         return jsonify({

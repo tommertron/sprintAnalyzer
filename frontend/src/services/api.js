@@ -133,6 +133,42 @@ export async function getQualityMetrics(credentials, boardId, dateRange = null) 
 }
 
 /**
+ * Get time in status metrics
+ */
+export async function getTimeInStatusMetrics(credentials, boardId, dateRange = null) {
+  const client = createClient(credentials)
+  const params = {}
+  if (dateRange) {
+    if (dateRange.sprintCount) {
+      params.sprint_count = dateRange.sprintCount
+    } else {
+      if (dateRange.startDate) params.start_date = dateRange.startDate
+      if (dateRange.endDate) params.end_date = dateRange.endDate
+    }
+  }
+  const response = await client.get(`/metrics/${boardId}/time-in-status`, { params })
+  return response.data.data
+}
+
+/**
+ * Get sprint carryover metrics
+ */
+export async function getSprintCarryoverMetrics(credentials, boardId, dateRange = null) {
+  const client = createClient(credentials)
+  const params = {}
+  if (dateRange) {
+    if (dateRange.sprintCount) {
+      params.sprint_count = dateRange.sprintCount
+    } else {
+      if (dateRange.startDate) params.start_date = dateRange.startDate
+      if (dateRange.endDate) params.end_date = dateRange.endDate
+    }
+  }
+  const response = await client.get(`/metrics/${boardId}/sprint-carryover`, { params })
+  return response.data.data
+}
+
+/**
  * Get future sprints for a board (not yet started)
  */
 export async function getFutureSprints(credentials, boardId) {

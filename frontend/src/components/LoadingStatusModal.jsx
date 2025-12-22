@@ -109,22 +109,30 @@ function LoadingStatusModal({ isOpen, onComplete }) {
     const stepDurations = [400, 800, 600, 500, 500, 600, 300]
     let stepIndex = 0
     let timeoutId
+    let cancelled = false
 
     const advanceStep = () => {
-      if (stepIndex < LOADING_STEPS.length) {
-        setCurrentStep(stepIndex)
-
-        timeoutId = setTimeout(() => {
-          setCompletedSteps(prev => [...prev, LOADING_STEPS[stepIndex].id])
-          stepIndex++
-          advanceStep()
-        }, stepDurations[stepIndex] || 500)
+      if (cancelled || stepIndex >= LOADING_STEPS.length) {
+        return
       }
+
+      setCurrentStep(stepIndex)
+      const currentIndex = stepIndex // Capture current index for closure
+
+      timeoutId = setTimeout(() => {
+        if (cancelled || currentIndex >= LOADING_STEPS.length) {
+          return
+        }
+        setCompletedSteps(prev => [...prev, LOADING_STEPS[currentIndex].id])
+        stepIndex++
+        advanceStep()
+      }, stepDurations[currentIndex] || 500)
     }
 
     advanceStep()
 
     return () => {
+      cancelled = true
       if (timeoutId) clearTimeout(timeoutId)
     }
   }, [isOpen])

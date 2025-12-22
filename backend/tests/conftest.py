@@ -223,16 +223,16 @@ def client(app):
 
 @pytest.fixture
 def sample_issue_with_changelog():
-    """Sample issue with status change history."""
+    """Sample UNRESOLVED issue with status change history for bottleneck analysis."""
     return {
         "key": "PROJ-200",
         "fields": {
             "summary": "Feature with status changes",
             "issuetype": {"name": "Story", "subtask": False},
-            "status": {"name": "Done"},
-            "resolution": {"name": "Done"},
+            "status": {"name": "Code Review"},  # Currently in Code Review (unresolved)
+            "resolution": None,  # Not resolved - still in progress
             "created": "2024-01-02T09:00:00.000+0000",
-            "resolutiondate": "2024-01-10T17:00:00.000+0000",
+            "resolutiondate": None,
             "customfield_10002": 5.0,
             "changelog": {
                 "histories": [
@@ -265,16 +265,6 @@ def sample_issue_with_changelog():
                                 "toString": "Code Review"
                             }
                         ]
-                    },
-                    {
-                        "created": "2024-01-08T11:00:00.000+0000",
-                        "items": [
-                            {
-                                "field": "status",
-                                "fromString": "Code Review",
-                                "toString": "Done"
-                            }
-                        ]
                     }
                 ]
             }
@@ -284,16 +274,16 @@ def sample_issue_with_changelog():
 
 @pytest.fixture
 def sample_issue_no_changelog():
-    """Sample issue without changelog (stayed in one status)."""
+    """Sample UNRESOLVED issue without changelog (stayed in one status)."""
     return {
         "key": "PROJ-201",
         "fields": {
             "summary": "Quick fix",
             "issuetype": {"name": "Bug", "subtask": False},
-            "status": {"name": "Done"},
-            "resolution": {"name": "Done"},
+            "status": {"name": "In Progress"},  # Currently in progress
+            "resolution": None,  # Not resolved
             "created": "2024-01-05T09:00:00.000+0000",
-            "resolutiondate": "2024-01-06T10:00:00.000+0000",
+            "resolutiondate": None,
             "customfield_10002": 2.0,
             "changelog": {"histories": []}
         }
@@ -302,16 +292,16 @@ def sample_issue_no_changelog():
 
 @pytest.fixture
 def sample_issue_multiple_transitions():
-    """Sample issue that went back and forth between statuses."""
+    """Sample UNRESOLVED issue that went back and forth between statuses."""
     return {
         "key": "PROJ-202",
         "fields": {
             "summary": "Issue with rework",
             "issuetype": {"name": "Story", "subtask": False},
-            "status": {"name": "Done"},
-            "resolution": {"name": "Done"},
+            "status": {"name": "In Progress"},  # Currently back in progress
+            "resolution": None,  # Not resolved
             "created": "2024-01-02T08:00:00.000+0000",
-            "resolutiondate": "2024-01-12T16:00:00.000+0000",
+            "resolutiondate": None,
             "customfield_10002": 3.0,
             "changelog": {
                 "histories": [
@@ -326,14 +316,6 @@ def sample_issue_multiple_transitions():
                     {
                         "created": "2024-01-06T11:00:00.000+0000",
                         "items": [{"field": "status", "fromString": "Code Review", "toString": "In Progress"}]
-                    },
-                    {
-                        "created": "2024-01-10T14:00:00.000+0000",
-                        "items": [{"field": "status", "fromString": "In Progress", "toString": "Code Review"}]
-                    },
-                    {
-                        "created": "2024-01-12T16:00:00.000+0000",
-                        "items": [{"field": "status", "fromString": "Code Review", "toString": "Done"}]
                     }
                 ]
             }

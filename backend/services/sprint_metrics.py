@@ -16,6 +16,7 @@ class SprintMetricsService:
         self._story_points_fields_cache = None
         self._sprints_cache = {}
         self._issues_cache = {}
+        self._status_categories_cache = None
 
     def _request(self, endpoint: str, params: Optional[dict] = None):
         """Make authenticated request to Jira API."""
@@ -59,6 +60,32 @@ class SprintMetricsService:
 
         self._story_points_fields_cache = sp_fields
         return sp_fields
+
+    def _get_status_categories(self) -> dict:
+        """Get status category mapping for all statuses.
+
+        Returns a dict mapping status name (lowercase) to category key.
+        Category keys are: 'new' (To Do), 'indeterminate' (In Progress), 'done' (Done)
+
+        Only 'indeterminate' (In Progress) statuses are considered bottlenecks.
+        """
+        if self._status_categories_cache is not None:
+            return self._status_categories_cache
+
+        try:
+            statuses = self._request("/rest/api/3/status")
+            status_map = {}
+            for status in statuses:
+                name = status.get("name", "").lower()
+                category = status.get("statusCategory", {})
+                category_key = category.get("key", "unknown")
+                status_map[name] = category_key
+            self._status_categories_cache = status_map
+            return status_map
+        except Exception:
+            # Fallback to empty map if API fails
+            self._status_categories_cache = {}
+            return {}
 
     def _get_sprints(self, board_id: int, limit: int = 6,
                      start_date: str = None, end_date: str = None,
@@ -125,7 +152,7 @@ class SprintMetricsService:
 
         base_fields = [
             "summary", "issuetype", "status", "resolution",
-            "created", "resolutiondate", "parent", "changelog", "assignee"
+            "created", "resolutiondate", "parent", "assignee"
         ]
         for sp_field in sp_fields:
             if sp_field not in base_fields:
@@ -141,7 +168,8 @@ class SprintMetricsService:
                 params={
                     "startAt": start_at,
                     "maxResults": max_results,
-                    "fields": ",".join(base_fields)
+                    "fields": ",".join(base_fields),
+                    "expand": "changelog"  # Required to get status transition history
                 }
             )
 
@@ -155,6 +183,65 @@ class SprintMetricsService:
 
         self._issues_cache[sprint_id] = all_issues
         return all_issues
+
+    def _get_sprint_issues_historical(self, sprint_id: int) -> list:
+        """Get all issues that were EVER in a sprint (including removed ones).
+
+        Uses JQL 'sprint WAS' syntax to capture issues that were in the sprint
+        at any point, even if they were later moved to backlog or another sprint.
+        This is important for bottleneck analysis to see where work got stuck.
+
+        Falls back to regular sprint issues if JQL query fails.
+        """
+        cache_key = f"historical_{sprint_id}"
+        if cache_key in self._issues_cache:
+            return self._issues_cache[cache_key]
+
+        sp_fields = self._get_story_points_fields()
+
+        base_fields = [
+            "summary", "issuetype", "status", "resolution",
+            "created", "resolutiondate", "parent", "assignee"
+        ]
+        for sp_field in sp_fields:
+            if sp_field not in base_fields:
+                base_fields.append(sp_field)
+
+        all_issues = []
+        start_at = 0
+        max_results = 100
+
+        # Use JQL search with 'sprint WAS' to get historical sprint membership
+        jql = f"sprint WAS {sprint_id}"
+
+        try:
+            while True:
+                data = self._request(
+                    "/rest/api/3/search",
+                    params={
+                        "jql": jql,
+                        "startAt": start_at,
+                        "maxResults": max_results,
+                        "fields": ",".join(base_fields),
+                        "expand": "changelog"
+                    }
+                )
+
+                issues = data.get("issues", [])
+                all_issues.extend(issues)
+
+                if len(issues) < max_results:
+                    break
+
+                start_at += max_results
+
+            self._issues_cache[cache_key] = all_issues
+            return all_issues
+        except Exception as e:
+            # Fall back to regular sprint issues if JQL fails
+            print(f"WARNING: Historical sprint query failed for sprint {sprint_id}: {e}")
+            print(f"Falling back to current sprint issues")
+            return self._get_sprint_issues(sprint_id)
 
     def _prefetch_all_data(self, board_id: int,
                            start_date: str = None, end_date: str = None,
@@ -193,11 +280,37 @@ class SprintMetricsService:
 
         return None
 
+    # Terminal statuses that indicate work is done (for issues without resolution set)
+    TERMINAL_STATUSES = {
+        "done", "closed", "resolved", "complete", "completed",
+        "cancelled", "canceled", "won't do", "wont do", "descoped"
+    }
+
     def _is_completed(self, issue: dict) -> bool:
-        """Check if an issue is completed (resolved)."""
+        """Check if an issue is completed (resolved).
+
+        An issue is resolved if:
+        1. It has a resolution field set, OR
+        2. It has a resolutiondate, OR
+        3. It's in a terminal status (Done, Cancelled, Won't Do, etc.)
+           - This handles cases where someone moved to a terminal status
+             without properly setting the resolution in Jira
+        """
         fields = issue.get("fields", {})
         resolution = fields.get("resolution")
-        return resolution is not None
+        resolutiondate = fields.get("resolutiondate")
+
+        # Check resolution field - could be dict like {"name": "Done"} or None
+        has_resolution = resolution is not None and resolution != ""
+
+        # Also check resolutiondate as backup
+        has_resolution_date = resolutiondate is not None and resolutiondate != ""
+
+        # Check if status is a terminal status (handles data quality issues)
+        status_name = fields.get("status", {}).get("name", "").lower()
+        is_terminal_status = status_name in self.TERMINAL_STATUSES
+
+        return has_resolution or has_resolution_date or is_terminal_status
 
     def _parse_date(self, date_str: Optional[str]) -> Optional[datetime]:
         """Parse Jira date string."""
@@ -1035,13 +1148,37 @@ class SprintMetricsService:
     def _calculate_time_in_status(self, sprints: list, sprint_issues: dict) -> dict:
         """Calculate time spent in each status for sprint issues.
 
-        Returns metrics showing where work spends time, helping identify
-        bottlenecks in the team's workflow.
+        Returns metrics showing where work spent time during the sprint,
+        helping identify bottlenecks in the team's workflow.
+
+        Key behavior:
+        - Uses historical sprint query (sprint WAS) to capture issues that were
+          removed from the sprint before it closed
+        - Includes ALL issues regardless of current resolution status
+        - Only analyzes time within sprint date boundaries
+        - Only tracks "In Progress" category statuses (bottlenecks)
+        - Excludes "To Do" (not started) and "Done" (completed) categories
         """
+        # Get status category mapping: status_name -> category_key
+        # Categories: 'new' (To Do), 'indeterminate' (In Progress), 'done' (Done)
+        status_categories = self._get_status_categories()
+
+        def is_in_progress_status(status_name: str) -> bool:
+            """Check if a status is an 'In Progress' type (the only bottleneck category)."""
+            if not status_name:
+                return False
+            category = status_categories.get(status_name.lower(), "unknown")
+            # Only 'indeterminate' statuses are bottlenecks (In Progress)
+            # 'new' = To Do (not started), 'done' = Done (completed)
+            return category == "indeterminate"
+
         sprint_status_metrics = []
 
         for sprint in sprints:
-            issues = sprint_issues.get(sprint["id"], [])
+            # Use historical query to get issues that were EVER in the sprint,
+            # not just those currently in it. This captures issues that were
+            # moved to backlog or another sprint before the sprint closed.
+            issues = self._get_sprint_issues_historical(sprint["id"])
             sprint_start = self._parse_date(sprint.get("startDate"))
             sprint_end = self._parse_date(sprint.get("endDate"))
 
@@ -1054,19 +1191,24 @@ class SprintMetricsService:
             if hasattr(sprint_end, 'replace'):
                 sprint_end = sprint_end.replace(tzinfo=None)
 
-            # Track time per status across all issues
+            # Track time per status across all issues (excluding terminal statuses)
             # Structure: {status: [time_in_hours_per_issue, ...]}
             status_times = {}
             status_issue_counts = {}
+            # Track individual issue details per status for diagnostics
+            # Structure: {status: [{key, summary, timeHours, currentStatus, issueType}, ...]}
+            status_issue_details = {}
 
             for issue in issues:
                 fields = issue.get("fields", {})
-                changelog = fields.get("changelog", {})
+                current_status_name = fields.get("status", {}).get("name")
+
+                # Changelog can be at issue level (when using expand=changelog) or in fields
+                changelog = issue.get("changelog") or fields.get("changelog") or {}
                 histories = changelog.get("histories", []) if isinstance(changelog, dict) else []
 
                 # Build timeline of status transitions
                 transitions = []
-                current_status = None
 
                 # Sort histories by creation date
                 sorted_histories = sorted(
@@ -1089,85 +1231,133 @@ class SprintMetricsService:
 
                 # If no transitions found, use current status from issue creation
                 if not transitions:
-                    current_status_name = fields.get("status", {}).get("name")
                     if current_status_name:
                         created = self._parse_date(fields.get("created"))
                         if created:
                             if hasattr(created, 'replace'):
                                 created = created.replace(tzinfo=None)
-                            # Calculate time from creation to sprint end (or resolution)
-                            resolution = self._parse_date(fields.get("resolutiondate"))
-                            if resolution:
-                                if hasattr(resolution, 'replace'):
-                                    resolution = resolution.replace(tzinfo=None)
-                                end_time = min(resolution, sprint_end)
-                            else:
-                                end_time = sprint_end
 
+                            end_time = sprint_end
                             start_time = max(created, sprint_start)
                             if start_time < end_time:
+                                # Only track In Progress category statuses (bottlenecks)
+                                # Skip To Do and Done category statuses
+                                if not is_in_progress_status(current_status_name):
+                                    continue
+
                                 hours = (end_time - start_time).total_seconds() / 3600
                                 if current_status_name not in status_times:
                                     status_times[current_status_name] = []
                                     status_issue_counts[current_status_name] = set()
+                                    status_issue_details[current_status_name] = []
                                 status_times[current_status_name].append(hours)
                                 status_issue_counts[current_status_name].add(issue.get("key"))
+                                status_issue_details[current_status_name].append({
+                                    "key": issue.get("key"),
+                                    "summary": fields.get("summary", ""),
+                                    "timeHours": round(hours, 1),
+                                    "currentStatus": current_status_name,
+                                    "issueType": fields.get("issuetype", {}).get("name", "")
+                                })
                     continue
 
                 # Process transitions to calculate time in each status
+                # Each transition represents: at time T, status changed FROM fromStatus TO toStatus
+                # So the issue was in fromStatus from the previous transition time until this transition time
                 for i, transition in enumerate(transitions):
                     status = transition["fromStatus"]
-                    transition_start = transition["time"]
 
-                    # Find when this status ended
-                    if i + 1 < len(transitions):
-                        transition_end = transitions[i + 1]["time"]
-                    else:
-                        # Last known status - use resolution date or sprint end
-                        resolution = self._parse_date(fields.get("resolutiondate"))
-                        if resolution:
-                            if hasattr(resolution, 'replace'):
-                                resolution = resolution.replace(tzinfo=None)
-                            transition_end = min(resolution, sprint_end)
+                    if not status:
+                        continue  # Skip null fromStatus (e.g., initial creation)
+
+                    # When did this status start?
+                    if i == 0:
+                        # First transition - use issue creation as start
+                        created = self._parse_date(fields.get("created"))
+                        if created:
+                            if hasattr(created, 'replace'):
+                                created = created.replace(tzinfo=None)
+                            status_start = created
                         else:
-                            transition_end = sprint_end
+                            status_start = sprint_start
+                    else:
+                        # Status started at the previous transition
+                        status_start = transitions[i - 1]["time"]
+
+                    # Status ended at this transition
+                    status_end = transition["time"]
 
                     # Only count time within sprint boundaries
-                    actual_start = max(transition_start, sprint_start)
-                    actual_end = min(transition_end, sprint_end)
+                    actual_start = max(status_start, sprint_start)
+                    actual_end = min(status_end, sprint_end)
 
-                    if actual_start < actual_end and status:
+                    if actual_start < actual_end:
+                        # Only track In Progress category statuses (bottlenecks)
+                        # Skip To Do and Done category statuses
+                        if not is_in_progress_status(status):
+                            continue
+
                         hours = (actual_end - actual_start).total_seconds() / 3600
                         if status not in status_times:
                             status_times[status] = []
                             status_issue_counts[status] = set()
+                            status_issue_details[status] = []
                         status_times[status].append(hours)
                         status_issue_counts[status].add(issue.get("key"))
+                        # Track issue details - aggregate time per issue/status combo
+                        existing = next((d for d in status_issue_details[status] if d["key"] == issue.get("key")), None)
+                        if existing:
+                            existing["timeHours"] = round(existing["timeHours"] + hours, 1)
+                        else:
+                            status_issue_details[status].append({
+                                "key": issue.get("key"),
+                                "summary": fields.get("summary", ""),
+                                "timeHours": round(hours, 1),
+                                "currentStatus": current_status_name,
+                                "issueType": fields.get("issuetype", {}).get("name", "")
+                            })
 
-                # Handle the final status (toStatus of last transition)
+                # Handle the final/current status after all transitions
+                # Track time in current status until sprint end
                 if transitions:
                     last_transition = transitions[-1]
-                    final_status = last_transition["toStatus"]
+                    final_status = current_status_name
                     transition_start = last_transition["time"]
+                    transition_end = sprint_end
 
-                    resolution = self._parse_date(fields.get("resolutiondate"))
-                    if resolution:
-                        if hasattr(resolution, 'replace'):
-                            resolution = resolution.replace(tzinfo=None)
-                        transition_end = min(resolution, sprint_end)
-                    else:
-                        transition_end = sprint_end
+                    # If current status differs from last transition's toStatus,
+                    # find when the issue entered the current status
+                    if final_status != last_transition["toStatus"]:
+                        for t in reversed(transitions):
+                            if t["toStatus"] == final_status:
+                                transition_start = t["time"]
+                                break
 
                     actual_start = max(transition_start, sprint_start)
                     actual_end = min(transition_end, sprint_end)
 
                     if actual_start < actual_end and final_status:
-                        hours = (actual_end - actual_start).total_seconds() / 3600
-                        if final_status not in status_times:
-                            status_times[final_status] = []
-                            status_issue_counts[final_status] = set()
-                        status_times[final_status].append(hours)
-                        status_issue_counts[final_status].add(issue.get("key"))
+                        # Only track In Progress category statuses (bottlenecks)
+                        if is_in_progress_status(final_status):
+                            hours = (actual_end - actual_start).total_seconds() / 3600
+                            if final_status not in status_times:
+                                status_times[final_status] = []
+                                status_issue_counts[final_status] = set()
+                                status_issue_details[final_status] = []
+                            status_times[final_status].append(hours)
+                            status_issue_counts[final_status].add(issue.get("key"))
+                            # Track issue details - aggregate time per issue/status combo
+                            existing = next((d for d in status_issue_details[final_status] if d["key"] == issue.get("key")), None)
+                            if existing:
+                                existing["timeHours"] = round(existing["timeHours"] + hours, 1)
+                            else:
+                                status_issue_details[final_status].append({
+                                    "key": issue.get("key"),
+                                    "summary": fields.get("summary", ""),
+                                    "timeHours": round(hours, 1),
+                                    "currentStatus": current_status_name,
+                                    "issueType": fields.get("issuetype", {}).get("name", "")
+                                })
 
             # Calculate statistics for each status
             status_breakdown = []
@@ -1183,6 +1373,13 @@ class SprintMetricsService:
                     p90_idx = int(len(sorted_times) * 0.9)
                     p90_time = sorted_times[p90_idx] if p90_idx < len(sorted_times) else sorted_times[-1]
 
+                    # Get issue details for this status, sorted by time descending
+                    issues = sorted(
+                        status_issue_details.get(status, []),
+                        key=lambda x: x["timeHours"],
+                        reverse=True
+                    )
+
                     status_breakdown.append({
                         "status": status,
                         "avgTimeHours": round(avg_time, 1),
@@ -1190,7 +1387,9 @@ class SprintMetricsService:
                         "p90TimeHours": round(p90_time, 1),
                         "totalTimeHours": round(total_time, 1),
                         "issueCount": len(status_issue_counts[status]),
-                        "percentOfCycleTime": 0  # Will calculate after we know total
+                        "percentOfCycleTime": 0,  # Will calculate after we know total
+                        "isTerminal": False,  # Terminal statuses are excluded from tracking
+                        "issues": issues
                     })
 
             # Calculate percentages
@@ -1203,7 +1402,8 @@ class SprintMetricsService:
             # Sort by total time (descending) to identify bottlenecks
             status_breakdown.sort(key=lambda x: x["totalTimeHours"], reverse=True)
 
-            # Identify bottleneck (status with highest average time)
+            # Identify bottleneck - status with highest total time
+            # (terminal statuses are already excluded from tracking)
             bottleneck = status_breakdown[0]["status"] if status_breakdown else None
 
             sprint_status_metrics.append({

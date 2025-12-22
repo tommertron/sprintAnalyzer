@@ -137,8 +137,14 @@ View historical sprint metrics for your team:
 - **Completion Rate** - Percentage of committed work completed
 - **Quality Metrics** - Bug ratio, incomplete work, ticket age
 - **Strategic Alignment** - Work linked to initiatives vs. orphan work
+- **Workflow Health (Time in Status)** - [ALPHA] Where issues spend time in your workflow. Data accuracy is still being validated.
+- **Sprint Carryover Analysis** - Issues carried over between sprints
 
 Use the date range selector to analyze different time periods.
+
+### Display Settings
+
+Click the **Settings** button in the header to customize which charts are visible on the Metrics dashboard. Your preferences are saved locally in your browser.
 
 ### Planning Tab
 

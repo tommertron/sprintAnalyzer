@@ -14,8 +14,10 @@ import SprintSelector from '../components/SprintSelector'
 import PlanningMetrics from '../components/PlanningMetrics'
 import CapacityPlanning from '../components/CapacityPlanning'
 import LoadingStatusModal from '../components/LoadingStatusModal'
+import SettingsPanel from '../components/SettingsPanel'
 
 const RECENT_BOARDS_KEY = 'sprintAnalyzer_recentBoards'
+const HIDDEN_CHARTS_KEY = 'sprintAnalyzer_hiddenCharts'
 const METRICS_CACHE_KEY = 'sprintAnalyzer_metricsCache'
 const EXCLUDED_SPACES_KEY = 'sprintAnalyzer_excludedSpaces'
 const SERVICE_LABEL_KEY = 'sprintAnalyzer_serviceLabel'
@@ -58,6 +60,17 @@ const styles = {
     padding: '6px 12px',
     cursor: 'pointer',
     fontSize: '14px'
+  },
+  settingsBtn: {
+    background: 'none',
+    border: '1px solid #ddd',
+    borderRadius: '4px',
+    padding: '6px 12px',
+    cursor: 'pointer',
+    fontSize: '14px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px'
   },
   main: {
     maxWidth: '1200px',
@@ -286,15 +299,20 @@ function Dashboard({ credentials, onLogout }) {
   const [carryoverData, setCarryoverData] = useState(null)
   const [workflowMetricsLoading, setWorkflowMetricsLoading] = useState(false)
 
+  // Settings state
+  const [hiddenCharts, setHiddenCharts] = useState([])
+  const [showSettings, setShowSettings] = useState(false)
+
   // Ref to track sprint that was just loaded by the main planning effect
   const lastLoadedSprintRef = useRef(null)
 
-  // Load recent boards, cache, excluded spaces, and service label from localStorage on mount
+  // Load recent boards, cache, excluded spaces, service label, and hidden charts from localStorage on mount
   useEffect(() => {
     setRecentBoards(loadFromStorage(RECENT_BOARDS_KEY, []))
     setMetricsCache(loadFromStorage(METRICS_CACHE_KEY, {}))
     setExcludedSpaces(loadFromStorage(EXCLUDED_SPACES_KEY, []))
     setServiceLabel(loadFromStorage(SERVICE_LABEL_KEY, null))
+    setHiddenCharts(loadFromStorage(HIDDEN_CHARTS_KEY, []))
   }, [])
 
   // Load boards list
@@ -424,6 +442,11 @@ function Dashboard({ credentials, onLogout }) {
   const handleServiceLabelChange = (newLabel) => {
     setServiceLabel(newLabel || null)
     saveToStorage(SERVICE_LABEL_KEY, newLabel || null)
+  }
+
+  const handleHiddenChartsChange = (newHidden) => {
+    setHiddenCharts(newHidden)
+    saveToStorage(HIDDEN_CHARTS_KEY, newHidden)
   }
 
   const handleRefresh = () => {
@@ -783,11 +806,25 @@ function Dashboard({ credentials, onLogout }) {
             />
           )}
           <span>{credentials.user?.displayName || credentials.email}</span>
+          <button style={styles.settingsBtn} onClick={() => setShowSettings(true)}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+            Settings
+          </button>
           <button style={styles.logoutBtn} onClick={onLogout}>
             Logout
           </button>
         </div>
       </header>
+
+      <SettingsPanel
+        isOpen={showSettings}
+        onClose={() => setShowSettings(false)}
+        hiddenCharts={hiddenCharts}
+        onHiddenChartsChange={handleHiddenChartsChange}
+      />
 
       <main style={styles.main}>
         <div style={styles.controls}>
@@ -903,175 +940,200 @@ function Dashboard({ credentials, onLogout }) {
               />
             </div>
 
-            <div style={styles.chartSection}>
-              <div style={styles.sectionHeader}>
-                <h2 style={styles.sectionTitle}>Velocity Trend {getSprintCountLabel()}</h2>
-                <div style={styles.chartCallouts}>
-                  <div style={styles.callout}>
-                    <div style={styles.calloutLabel}>Average</div>
-                    <div style={styles.calloutValue}>
-                      {(metrics.velocity?.averageVelocity || 0).toFixed(1)}
-                      <span style={styles.calloutUnit}> pts</span>
+            {!hiddenCharts.includes('velocityChart') && (
+              <div style={styles.chartSection}>
+                <div style={styles.sectionHeader}>
+                  <h2 style={styles.sectionTitle}>Velocity Trend {getSprintCountLabel()}</h2>
+                  <div style={styles.chartCallouts}>
+                    <div style={styles.callout}>
+                      <div style={styles.calloutLabel}>Average</div>
+                      <div style={styles.calloutValue}>
+                        {(metrics.velocity?.averageVelocity || 0).toFixed(1)}
+                        <span style={styles.calloutUnit}> pts</span>
+                      </div>
                     </div>
                   </div>
                 </div>
+                <VelocityChart data={metrics.velocity?.sprints || []} />
               </div>
-              <VelocityChart data={metrics.velocity?.sprints || []} />
-            </div>
+            )}
 
-            <div style={styles.chartSection}>
-              <div style={styles.sectionHeader}>
-                <h2 style={styles.sectionTitle}>Completion Rate {getSprintCountLabel()}</h2>
-                <div style={styles.chartCallouts}>
-                  <div style={styles.callout}>
-                    <div style={styles.calloutLabel}>Average</div>
-                    <div style={styles.calloutValue}>
-                      {(metrics.completion?.averageCompletionRate || 0).toFixed(1)}
-                      <span style={styles.calloutUnit}>%</span>
+            {!hiddenCharts.includes('completionChart') && (
+              <div style={styles.chartSection}>
+                <div style={styles.sectionHeader}>
+                  <h2 style={styles.sectionTitle}>Completion Rate {getSprintCountLabel()}</h2>
+                  <div style={styles.chartCallouts}>
+                    <div style={styles.callout}>
+                      <div style={styles.calloutLabel}>Average</div>
+                      <div style={styles.calloutValue}>
+                        {(metrics.completion?.averageCompletionRate || 0).toFixed(1)}
+                        <span style={styles.calloutUnit}>%</span>
+                      </div>
                     </div>
                   </div>
                 </div>
+                <CompletionChart data={metrics.completion?.sprints || []} />
               </div>
-              <CompletionChart data={metrics.completion?.sprints || []} />
-            </div>
+            )}
 
-            <div style={styles.chartSection}>
-              <div style={styles.sectionHeader}>
-                <h2 style={styles.sectionTitle}>Quality Metrics {getSprintCountLabel()}</h2>
-                <div style={styles.chartCallouts}>
-                  {(() => {
-                    const sprints = metrics.quality?.sprints || []
-                    const avgBugRatio = sprints.length > 0
-                      ? sprints.reduce((sum, s) => sum + s.bugRatio, 0) / sprints.length
-                      : 0
-                    const avgIncomplete = sprints.length > 0
-                      ? sprints.reduce((sum, s) => sum + s.incompletePercentage, 0) / sprints.length
-                      : 0
-                    const avgAge = sprints.length > 0
-                      ? sprints.reduce((sum, s) => sum + s.averageTicketAgeDays, 0) / sprints.length
-                      : 0
-                    return (
-                      <>
-                        <div style={styles.callout}>
-                          <div style={styles.calloutLabel}>Avg Bug Ratio</div>
-                          <div style={styles.calloutValue}>
-                            {avgBugRatio.toFixed(1)}
-                            <span style={styles.calloutUnit}>%</span>
+            {!hiddenCharts.includes('qualityMetrics') && (
+              <div style={styles.chartSection}>
+                <div style={styles.sectionHeader}>
+                  <h2 style={styles.sectionTitle}>Quality Metrics {getSprintCountLabel()}</h2>
+                  <div style={styles.chartCallouts}>
+                    {(() => {
+                      const sprints = metrics.quality?.sprints || []
+                      const avgBugRatio = sprints.length > 0
+                        ? sprints.reduce((sum, s) => sum + s.bugRatio, 0) / sprints.length
+                        : 0
+                      const avgIncomplete = sprints.length > 0
+                        ? sprints.reduce((sum, s) => sum + s.incompletePercentage, 0) / sprints.length
+                        : 0
+                      const avgAge = sprints.length > 0
+                        ? sprints.reduce((sum, s) => sum + s.averageTicketAgeDays, 0) / sprints.length
+                        : 0
+                      return (
+                        <>
+                          <div style={styles.callout}>
+                            <div style={styles.calloutLabel}>Avg Bug Ratio</div>
+                            <div style={styles.calloutValue}>
+                              {avgBugRatio.toFixed(1)}
+                              <span style={styles.calloutUnit}>%</span>
+                            </div>
                           </div>
-                        </div>
-                        <div style={styles.callout}>
-                          <div style={styles.calloutLabel}>Avg Incomplete</div>
-                          <div style={styles.calloutValue}>
-                            {avgIncomplete.toFixed(1)}
-                            <span style={styles.calloutUnit}>%</span>
+                          <div style={styles.callout}>
+                            <div style={styles.calloutLabel}>Avg Incomplete</div>
+                            <div style={styles.calloutValue}>
+                              {avgIncomplete.toFixed(1)}
+                              <span style={styles.calloutUnit}>%</span>
+                            </div>
                           </div>
-                        </div>
-                        <div style={styles.callout}>
-                          <div style={styles.calloutLabel}>Avg Ticket Age</div>
-                          <div style={styles.calloutValue}>
-                            {avgAge.toFixed(1)}
-                            <span style={styles.calloutUnit}> days</span>
+                          <div style={styles.callout}>
+                            <div style={styles.calloutLabel}>Avg Ticket Age</div>
+                            <div style={styles.calloutValue}>
+                              {avgAge.toFixed(1)}
+                              <span style={styles.calloutUnit}> days</span>
+                            </div>
                           </div>
-                        </div>
-                      </>
-                    )
-                  })()}
+                        </>
+                      )
+                    })()}
+                  </div>
                 </div>
+                <QualityMetrics data={metrics.quality?.sprints || []} />
               </div>
-              <QualityMetrics data={metrics.quality?.sprints || []} />
-            </div>
+            )}
 
-            <div style={styles.chartSection}>
-              <div style={styles.sectionHeader}>
-                <h2 style={styles.sectionTitle}>Strategic Alignment {getSprintCountLabel()}</h2>
-                <div style={styles.chartCallouts}>
-                  {(() => {
-                    const sprints = metrics.alignment?.sprints || []
-                    const totalLinked = sprints.reduce((sum, s) => sum + (s.linkedToInitiative || 0), 0)
-                    const totalOrphan = sprints.reduce((sum, s) => sum + (s.orphanCount || 0), 0)
-                    const total = totalLinked + totalOrphan
-                    const linkedPct = total > 0 ? (totalLinked / total * 100) : 0
-                    return (
-                      <>
-                        <div style={styles.callout}>
-                          <div style={styles.calloutLabel}>Initiative-Linked</div>
-                          <div style={styles.calloutValue}>
-                            {linkedPct.toFixed(1)}
-                            <span style={styles.calloutUnit}>%</span>
+            {!hiddenCharts.includes('alignmentChart') && (
+              <div style={styles.chartSection}>
+                <div style={styles.sectionHeader}>
+                  <h2 style={styles.sectionTitle}>Strategic Alignment {getSprintCountLabel()}</h2>
+                  <div style={styles.chartCallouts}>
+                    {(() => {
+                      const sprints = metrics.alignment?.sprints || []
+                      const totalLinked = sprints.reduce((sum, s) => sum + (s.linkedToInitiative || 0), 0)
+                      const totalOrphan = sprints.reduce((sum, s) => sum + (s.orphanCount || 0), 0)
+                      const total = totalLinked + totalOrphan
+                      const linkedPct = total > 0 ? (totalLinked / total * 100) : 0
+                      return (
+                        <>
+                          <div style={styles.callout}>
+                            <div style={styles.calloutLabel}>Initiative-Linked</div>
+                            <div style={styles.calloutValue}>
+                              {linkedPct.toFixed(1)}
+                              <span style={styles.calloutUnit}>%</span>
+                            </div>
                           </div>
-                        </div>
-                        <div style={styles.callout}>
-                          <div style={styles.calloutLabel}>Total Points</div>
-                          <div style={styles.calloutValue}>
-                            {total.toFixed(1)}
-                            <span style={styles.calloutUnit}> pts</span>
+                          <div style={styles.callout}>
+                            <div style={styles.calloutLabel}>Total Points</div>
+                            <div style={styles.calloutValue}>
+                              {total.toFixed(1)}
+                              <span style={styles.calloutUnit}> pts</span>
+                            </div>
                           </div>
-                        </div>
-                      </>
-                    )
-                  })()}
+                        </>
+                      )
+                    })()}
+                  </div>
                 </div>
-              </div>
-              <div style={{ display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' }}>
-                <SpaceExclusionList
-                  discoveredSpaces={metrics.alignment?.discoveredSpaces || []}
-                  excludedSpaces={excludedSpaces}
-                  onChange={handleExcludedSpacesChange}
+                <div style={{ display: 'flex', gap: '16px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                  <SpaceExclusionList
+                    discoveredSpaces={metrics.alignment?.discoveredSpaces || []}
+                    excludedSpaces={excludedSpaces}
+                    onChange={handleExcludedSpacesChange}
+                  />
+                  {(metrics.alignment?.allLabels?.length > 0) && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <label style={{ fontSize: '13px', color: '#666', fontWeight: '500' }}>
+                        Service Label:
+                      </label>
+                      <select
+                        value={serviceLabel || ''}
+                        onChange={(e) => handleServiceLabelChange(e.target.value)}
+                        style={{
+                          padding: '6px 10px',
+                          borderRadius: '4px',
+                          border: '1px solid #ddd',
+                          fontSize: '13px',
+                          minWidth: '150px'
+                        }}
+                      >
+                        <option value="">None (show all as business)</option>
+                        {metrics.alignment.allLabels.map(label => (
+                          <option key={label} value={label}>{label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+                <AlignmentChart
+                  data={metrics.alignment?.sprints || []}
+                  discoveredSpaces={(metrics.alignment?.discoveredSpaces || []).map(space => ({
+                    ...space,
+                    isExcluded: excludedSpaces.includes(space.projectKey)
+                  }))}
+                  jiraServer={credentials.server}
+                  serviceLabel={serviceLabel}
                 />
-                {(metrics.alignment?.allLabels?.length > 0) && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <label style={{ fontSize: '13px', color: '#666', fontWeight: '500' }}>
-                      Service Label:
-                    </label>
-                    <select
-                      value={serviceLabel || ''}
-                      onChange={(e) => handleServiceLabelChange(e.target.value)}
-                      style={{
-                        padding: '6px 10px',
-                        borderRadius: '4px',
-                        border: '1px solid #ddd',
-                        fontSize: '13px',
-                        minWidth: '150px'
-                      }}
-                    >
-                      <option value="">None (show all as business)</option>
-                      {metrics.alignment.allLabels.map(label => (
-                        <option key={label} value={label}>{label}</option>
-                      ))}
-                    </select>
-                  </div>
+              </div>
+            )}
+
+            {!hiddenCharts.includes('timeInStatus') && (
+              <div style={styles.chartSection}>
+                <div style={styles.sectionHeader}>
+                  <h2 style={styles.sectionTitle}>
+                    Workflow Health {getSprintCountLabel()}
+                    <span style={{
+                      display: 'inline-block',
+                      padding: '2px 6px',
+                      background: '#FFAB00',
+                      color: '#172B4D',
+                      fontSize: '10px',
+                      fontWeight: '600',
+                      borderRadius: '3px',
+                      marginLeft: '8px',
+                      verticalAlign: 'middle'
+                    }}>ALPHA</span>
+                  </h2>
+                </div>
+                {workflowMetricsLoading && <div style={styles.loading}>Loading workflow metrics...</div>}
+                {!workflowMetricsLoading && timeInStatusData && (
+                  <TimeInStatusChart data={timeInStatusData} jiraServer={credentials.server} />
                 )}
               </div>
-              <AlignmentChart
-                data={metrics.alignment?.sprints || []}
-                discoveredSpaces={(metrics.alignment?.discoveredSpaces || []).map(space => ({
-                  ...space,
-                  isExcluded: excludedSpaces.includes(space.projectKey)
-                }))}
-                jiraServer={credentials.server}
-                serviceLabel={serviceLabel}
-              />
-            </div>
+            )}
 
-            <div style={styles.chartSection}>
-              <div style={styles.sectionHeader}>
-                <h2 style={styles.sectionTitle}>Workflow Health {getSprintCountLabel()}</h2>
+            {!hiddenCharts.includes('sprintCarryover') && (
+              <div style={styles.chartSection}>
+                <div style={styles.sectionHeader}>
+                  <h2 style={styles.sectionTitle}>Sprint Carryover Analysis {getSprintCountLabel()}</h2>
+                </div>
+                {workflowMetricsLoading && <div style={styles.loading}>Loading carryover metrics...</div>}
+                {!workflowMetricsLoading && carryoverData && (
+                  <SprintCarryoverChart data={carryoverData} />
+                )}
               </div>
-              {workflowMetricsLoading && <div style={styles.loading}>Loading workflow metrics...</div>}
-              {!workflowMetricsLoading && timeInStatusData && (
-                <TimeInStatusChart data={timeInStatusData} />
-              )}
-            </div>
-
-            <div style={styles.chartSection}>
-              <div style={styles.sectionHeader}>
-                <h2 style={styles.sectionTitle}>Sprint Carryover Analysis {getSprintCountLabel()}</h2>
-              </div>
-              {workflowMetricsLoading && <div style={styles.loading}>Loading carryover metrics...</div>}
-              {!workflowMetricsLoading && carryoverData && (
-                <SprintCarryoverChart data={carryoverData} />
-              )}
-            </div>
+            )}
                   </>
                 )}
               </div>

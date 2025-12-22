@@ -399,6 +399,9 @@ class TestCalculateTimeInStatus:
         }]
         sprint_issues = {1: [sample_issue_with_changelog]}
 
+        # Mock the historical query to return our test issues
+        service._get_sprint_issues_historical = lambda sprint_id: sprint_issues.get(sprint_id, [])
+
         result = service._calculate_time_in_status(sprints, sprint_issues)
 
         assert len(result["sprints"]) == 1
@@ -411,13 +414,14 @@ class TestCalculateTimeInStatus:
         # Find specific statuses
         statuses = {s["status"]: s for s in sprint_data["statusBreakdown"]}
 
-        # Should have tracked "To Do", "In Progress", "Code Review", and "Done"
+        # Should have tracked "To Do", "In Progress", and "Code Review" (current status)
+        # Only unresolved issues are tracked for bottleneck analysis
         assert "To Do" in statuses
         assert "In Progress" in statuses
         assert "Code Review" in statuses
 
     def test_handles_issue_without_changelog(self, mock_jira_credentials, sample_issue_no_changelog):
-        """Should handle issues that never changed status."""
+        """Should handle unresolved issues that never changed status."""
         service = SprintMetricsService(**mock_jira_credentials)
 
         sprints = [{
@@ -428,16 +432,19 @@ class TestCalculateTimeInStatus:
         }]
         sprint_issues = {1: [sample_issue_no_changelog]}
 
+        # Mock the historical query to return our test issues
+        service._get_sprint_issues_historical = lambda sprint_id: sprint_issues.get(sprint_id, [])
+
         result = service._calculate_time_in_status(sprints, sprint_issues)
 
         assert len(result["sprints"]) == 1
         sprint_data = result["sprints"][0]
 
-        # Should track time in current status (Done)
+        # Should track time in current status (In Progress)
         assert len(sprint_data["statusBreakdown"]) == 1
-        assert sprint_data["statusBreakdown"][0]["status"] == "Done"
-        # Time from creation (Jan 5 09:00) to resolution (Jan 6 10:00) = 25 hours
-        assert sprint_data["statusBreakdown"][0]["avgTimeHours"] == 25.0
+        assert sprint_data["statusBreakdown"][0]["status"] == "In Progress"
+        # Time from creation (Jan 5 09:00) to sprint end (Jan 14 00:00) = 207 hours
+        assert sprint_data["statusBreakdown"][0]["avgTimeHours"] == 207.0
 
     def test_handles_multiple_transitions_same_status(self, mock_jira_credentials, sample_issue_multiple_transitions):
         """Should correctly handle issues that transition back to same status."""
@@ -451,15 +458,16 @@ class TestCalculateTimeInStatus:
         }]
         sprint_issues = {1: [sample_issue_multiple_transitions]}
 
+        # Mock the historical query to return our test issues
+        service._get_sprint_issues_historical = lambda sprint_id: sprint_issues.get(sprint_id, [])
+
         result = service._calculate_time_in_status(sprints, sprint_issues)
 
         sprint_data = result["sprints"][0]
         statuses = {s["status"]: s for s in sprint_data["statusBreakdown"]}
 
-        # "In Progress" appears twice in the timeline
-        # First: Jan 3 09:00 to Jan 5 10:00 = 49 hours
-        # Second: Jan 6 11:00 to Jan 10 14:00 = 99 hours
-        # Total: 148 hours tracked across 2 occurrences
+        # Issue went: To Do -> In Progress -> Code Review -> In Progress (current)
+        # "In Progress" appears twice in the timeline plus current status
         assert "In Progress" in statuses
         assert statuses["In Progress"]["issueCount"] == 1  # One issue
 
@@ -467,26 +475,22 @@ class TestCalculateTimeInStatus:
         """Should calculate avg, median, and p90 time per status."""
         service = SprintMetricsService(**mock_jira_credentials)
 
-        # Create two issues to test statistics
+        # Create second unresolved issue to test statistics
         issue2 = {
             "key": "PROJ-203",
             "fields": {
                 "summary": "Another feature",
                 "issuetype": {"name": "Story", "subtask": False},
-                "status": {"name": "Done"},
-                "resolution": {"name": "Done"},
+                "status": {"name": "In Progress"},  # Currently in progress
+                "resolution": None,  # Not resolved
                 "created": "2024-01-02T10:00:00.000+0000",
-                "resolutiondate": "2024-01-08T12:00:00.000+0000",
+                "resolutiondate": None,
                 "customfield_10002": 3.0,
                 "changelog": {
                     "histories": [
                         {
                             "created": "2024-01-03T10:00:00.000+0000",
                             "items": [{"field": "status", "fromString": "To Do", "toString": "In Progress"}]
-                        },
-                        {
-                            "created": "2024-01-08T12:00:00.000+0000",
-                            "items": [{"field": "status", "fromString": "In Progress", "toString": "Done"}]
                         }
                     ]
                 }
@@ -500,6 +504,9 @@ class TestCalculateTimeInStatus:
             "endDate": "2024-01-14T00:00:00.000+0000"
         }]
         sprint_issues = {1: [sample_issue_with_changelog, issue2]}
+
+        # Mock the historical query to return our test issues
+        service._get_sprint_issues_historical = lambda sprint_id: sprint_issues.get(sprint_id, [])
 
         result = service._calculate_time_in_status(sprints, sprint_issues)
 
@@ -525,6 +532,9 @@ class TestCalculateTimeInStatus:
         }]
         sprint_issues = {1: [sample_issue_with_changelog]}
 
+        # Mock the historical query to return our test issues
+        service._get_sprint_issues_historical = lambda sprint_id: sprint_issues.get(sprint_id, [])
+
         result = service._calculate_time_in_status(sprints, sprint_issues)
 
         sprint_data = result["sprints"][0]
@@ -545,16 +555,16 @@ class TestCalculateTimeInStatus:
         """Should only count time within sprint boundaries."""
         service = SprintMetricsService(**mock_jira_credentials)
 
-        # Issue created before sprint, with transition during sprint, resolved after sprint
+        # Unresolved issue created before sprint, with transitions during sprint
         issue = {
             "key": "PROJ-204",
             "fields": {
                 "summary": "Long running issue",
                 "issuetype": {"name": "Story", "subtask": False},
-                "status": {"name": "Done"},
-                "resolution": {"name": "Done"},
+                "status": {"name": "Code Review"},  # Currently in code review
+                "resolution": None,  # Not resolved
                 "created": "2023-12-20T10:00:00.000+0000",  # Before sprint
-                "resolutiondate": "2024-01-20T15:00:00.000+0000",  # After sprint
+                "resolutiondate": None,
                 "customfield_10002": 5.0,
                 "changelog": {
                     "histories": [
@@ -565,10 +575,6 @@ class TestCalculateTimeInStatus:
                         {
                             "created": "2024-01-10T14:00:00.000+0000",  # During sprint
                             "items": [{"field": "status", "fromString": "In Progress", "toString": "Code Review"}]
-                        },
-                        {
-                            "created": "2024-01-20T12:00:00.000+0000",  # After sprint ends
-                            "items": [{"field": "status", "fromString": "Code Review", "toString": "Done"}]
                         }
                     ]
                 }
@@ -582,6 +588,9 @@ class TestCalculateTimeInStatus:
             "endDate": "2024-01-14T00:00:00.000+0000"  # 13 days = 312 hours
         }]
         sprint_issues = {1: [issue]}
+
+        # Mock the historical query to return our test issues
+        service._get_sprint_issues_historical = lambda sprint_id: sprint_issues.get(sprint_id, [])
 
         result = service._calculate_time_in_status(sprints, sprint_issues)
 
@@ -611,6 +620,9 @@ class TestCalculateTimeInStatus:
         }]
         sprint_issues = {1: [sample_issue_with_changelog]}
 
+        # Mock the historical query to return our test issues
+        service._get_sprint_issues_historical = lambda sprint_id: sprint_issues.get(sprint_id, [])
+
         result = service._calculate_time_in_status(sprints, sprint_issues)
 
         sprint_data = result["sprints"][0]
@@ -630,6 +642,9 @@ class TestCalculateTimeInStatus:
             "endDate": "2024-01-14T00:00:00.000+0000"
         }]
         sprint_issues = {1: []}
+
+        # Mock the historical query to return our test issues
+        service._get_sprint_issues_historical = lambda sprint_id: sprint_issues.get(sprint_id, [])
 
         result = service._calculate_time_in_status(sprints, sprint_issues)
 

@@ -1218,6 +1218,138 @@ class SprintMetricsService:
 
         return {"sprints": sprint_status_metrics}
 
+    def _calculate_sprint_carryover(self, sprints: list, sprint_issues: dict) -> dict:
+        """Calculate sprint carryover/spillover metrics.
+
+        Tracks issues that appear in multiple sprints, helping identify:
+        - Work that repeatedly doesn't get finished
+        - Estimation or scope problems
+        - Blocked work patterns
+        """
+        # Track issue history across sprints
+        # Structure: {issue_key: [sprint_id1, sprint_id2, ...]}
+        issue_sprint_history = {}
+
+        # Build history of which sprints each issue appeared in
+        for sprint in sprints:
+            sprint_id = sprint["id"]
+            issues = sprint_issues.get(sprint_id, [])
+
+            for issue in issues:
+                issue_key = issue.get("key")
+                if issue_key not in issue_sprint_history:
+                    issue_sprint_history[issue_key] = []
+                issue_sprint_history[issue_key].append(sprint_id)
+
+        # Analyze each sprint for carryover
+        sprint_carryover_metrics = []
+
+        for i, sprint in enumerate(sprints):
+            sprint_id = sprint["id"]
+            issues = sprint_issues.get(sprint_id, [])
+
+            # Get previous sprint (if exists)
+            previous_sprint_id = sprints[i + 1]["id"] if i + 1 < len(sprints) else None
+
+            total_issues = len(issues)
+            carryover_issues = []
+            new_issues = []
+            repeat_offenders = []  # Issues in 3+ sprints
+
+            total_points = 0.0
+            carryover_points = 0.0
+
+            for issue in issues:
+                issue_key = issue.get("key")
+                fields = issue.get("fields", {})
+                points = self._get_story_points(issue) or 0
+                total_points += points
+
+                # Count how many sprints this issue has been in
+                sprint_count = len(issue_sprint_history.get(issue_key, []))
+
+                # Check if this was in the previous sprint
+                was_in_previous = (
+                    previous_sprint_id and
+                    previous_sprint_id in issue_sprint_history.get(issue_key, [])
+                )
+
+                issue_data = {
+                    "key": issue_key,
+                    "summary": fields.get("summary", ""),
+                    "issueType": fields.get("issuetype", {}).get("name", ""),
+                    "status": fields.get("status", {}).get("name", ""),
+                    "isCompleted": self._is_completed(issue),
+                    "points": points,
+                    "sprintCount": sprint_count
+                }
+
+                if was_in_previous:
+                    carryover_issues.append(issue_data)
+                    carryover_points += points
+                else:
+                    new_issues.append(issue_data)
+
+                # Flag repeat offenders (3+ sprints)
+                if sprint_count >= 3:
+                    repeat_offenders.append(issue_data)
+
+            # Calculate percentages
+            carryover_count = len(carryover_issues)
+            carryover_pct = (carryover_count / total_issues * 100) if total_issues > 0 else 0
+            carryover_points_pct = (carryover_points / total_points * 100) if total_points > 0 else 0
+
+            # Track completion rate of carryover vs new
+            carryover_completed = sum(1 for i in carryover_issues if i["isCompleted"])
+            new_completed = sum(1 for i in new_issues if i["isCompleted"])
+
+            carryover_completion_rate = (
+                (carryover_completed / carryover_count * 100) if carryover_count > 0 else 0
+            )
+            new_completion_rate = (
+                (new_completed / len(new_issues) * 100) if len(new_issues) > 0 else 0
+            )
+
+            sprint_carryover_metrics.append({
+                "sprintId": sprint_id,
+                "sprintName": sprint["name"],
+                "startDate": sprint.get("startDate"),
+                "endDate": sprint.get("endDate"),
+                "totalIssues": total_issues,
+                "totalPoints": round(total_points, 1),
+                "carryoverCount": carryover_count,
+                "carryoverPercentage": round(carryover_pct, 1),
+                "carryoverPoints": round(carryover_points, 1),
+                "carryoverPointsPercentage": round(carryover_points_pct, 1),
+                "newIssuesCount": len(new_issues),
+                "carryoverCompletionRate": round(carryover_completion_rate, 1),
+                "newCompletionRate": round(new_completion_rate, 1),
+                "repeatOffendersCount": len(repeat_offenders),
+                "repeatOffenders": sorted(
+                    repeat_offenders,
+                    key=lambda x: x["sprintCount"],
+                    reverse=True
+                )[:10],  # Top 10 repeat offenders
+                "carryoverIssues": sorted(
+                    carryover_issues,
+                    key=lambda x: x["sprintCount"],
+                    reverse=True
+                )
+            })
+
+        # Calculate overall stats
+        total_carryover = sum(s["carryoverCount"] for s in sprint_carryover_metrics)
+        total_issues_all = sum(s["totalIssues"] for s in sprint_carryover_metrics)
+        avg_carryover_pct = (
+            (total_carryover / total_issues_all * 100) if total_issues_all > 0 else 0
+        )
+
+        return {
+            "sprints": sprint_carryover_metrics,
+            "averageCarryoverPercentage": round(avg_carryover_pct, 1),
+            "totalSprints": len(sprint_carryover_metrics)
+        }
+
     def _calculate_contributor_velocity(self, sprints: list, sprint_issues: dict) -> dict:
         """Calculate per-person velocity metrics from prefetched data.
 
@@ -1398,6 +1530,17 @@ class SprintMetricsService:
         """
         sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
         return self._calculate_time_in_status(sprints, sprint_issues)
+
+    def get_sprint_carryover_metrics(self, board_id: int,
+                                      start_date: str = None, end_date: str = None,
+                                      sprint_count: int = None) -> dict:
+        """Calculate sprint carryover/spillover metrics.
+
+        Returns data about issues that appear in multiple sprints,
+        helping identify scope, estimation, or blocking issues.
+        """
+        sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
+        return self._calculate_sprint_carryover(sprints, sprint_issues)
 
     def get_all_metrics(self, board_id: int, excluded_spaces: list = None,
                         start_date: str = None, end_date: str = None,

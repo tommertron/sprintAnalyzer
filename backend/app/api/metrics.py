@@ -413,3 +413,35 @@ def get_time_in_status(board_id):
         return jsonify({"data": time_in_status_data})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/<int:board_id>/sprint-carryover", methods=["GET"])
+def get_sprint_carryover(board_id):
+    """Get sprint carryover/spillover metrics.
+
+    Query params:
+        - start_date: Optional ISO date (e.g., "2024-01-01")
+        - end_date: Optional ISO date (e.g., "2024-03-31")
+        - sprint_count: Optional number of sprints to include (default: 6)
+
+    Returns:
+        - Carryover count and percentage per sprint
+        - Carryover story points and percentage
+        - Comparison of completion rates (carryover vs new work)
+        - Repeat offenders (issues in 3+ sprints)
+        - List of all carryover issues with sprint count
+    """
+    server, email, token = get_jira_credentials()
+
+    if not server:
+        return jsonify({"error": "Missing Jira credentials in headers"}), 401
+
+    start_date, end_date = get_date_range()
+    sprint_count = get_sprint_count() or 6
+
+    try:
+        service = SprintMetricsService(server, email, token)
+        carryover_data = service.get_sprint_carryover_metrics(board_id, start_date, end_date, sprint_count)
+        return jsonify({"data": carryover_data})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500

@@ -336,7 +336,12 @@ class SprintMetricsService:
         return None
 
     def _calculate_velocity(self, sprints: list, sprint_issues: dict) -> dict:
-        """Calculate velocity metrics from prefetched data."""
+        """Calculate velocity metrics from prefetched data.
+
+        Normalizes velocity based on sprint length to allow fair comparison
+        between sprints of different durations. Uses median sprint length as
+        the standard, then calculates points/day and extrapolates.
+        """
         sprint_velocities = []
 
         for sprint in sprints:
@@ -349,20 +354,58 @@ class SprintMetricsService:
                     if points:
                         total_points += points
 
+            working_days = self._count_working_days(
+                sprint.get("startDate"),
+                sprint.get("endDate")
+            )
+
             sprint_velocities.append({
                 "sprintId": sprint["id"],
                 "sprintName": sprint["name"],
                 "startDate": sprint.get("startDate"),
                 "endDate": sprint.get("endDate"),
-                "completedPoints": total_points
+                "completedPoints": total_points,
+                "workingDays": working_days
             })
 
-        velocities = [s["completedPoints"] for s in sprint_velocities]
-        avg_velocity = sum(velocities) / len(velocities) if velocities else 0
+        # Calculate standard sprint length (median of all sprint lengths)
+        if sprint_velocities:
+            sorted_days = sorted(s["workingDays"] for s in sprint_velocities)
+            mid = len(sorted_days) // 2
+            if len(sorted_days) % 2 == 0:
+                standard_sprint_days = (sorted_days[mid - 1] + sorted_days[mid]) // 2
+            else:
+                standard_sprint_days = sorted_days[mid]
+        else:
+            standard_sprint_days = 10  # Default to 2 weeks
+
+        # Add normalized metrics to each sprint
+        for sprint_data in sprint_velocities:
+            working_days = sprint_data["workingDays"]
+            completed = sprint_data["completedPoints"]
+
+            if working_days > 0:
+                points_per_day = completed / working_days
+                normalized_points = points_per_day * standard_sprint_days
+            else:
+                points_per_day = 0
+                normalized_points = completed
+
+            sprint_data["pointsPerDay"] = round(points_per_day, 2)
+            sprint_data["normalizedPoints"] = round(normalized_points, 1)
+
+        # Calculate averages
+        raw_velocities = [s["completedPoints"] for s in sprint_velocities]
+        normalized_velocities = [s["normalizedPoints"] for s in sprint_velocities]
+
+        raw_avg = sum(raw_velocities) / len(raw_velocities) if raw_velocities else 0
+        normalized_avg = sum(normalized_velocities) / len(normalized_velocities) if normalized_velocities else 0
 
         return {
             "sprints": sprint_velocities,
-            "averageVelocity": round(avg_velocity, 1),
+            "averageVelocity": round(normalized_avg, 1),
+            "rawAverageVelocity": round(raw_avg, 1),
+            "standardSprintDays": standard_sprint_days,
             "totalSprints": len(sprint_velocities)
         }
 
@@ -1129,11 +1172,13 @@ class SprintMetricsService:
         if not start or not end:
             return 10
 
-        # Make dates timezone-naive for comparison
+        # Make dates timezone-naive and normalize to start of day
+        # End date needs to be at midnight so it's truly exclusive
+        # (Jira often sets end time to noon or end of day)
         if hasattr(start, 'replace'):
-            start = start.replace(tzinfo=None)
+            start = start.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
         if hasattr(end, 'replace'):
-            end = end.replace(tzinfo=None)
+            end = end.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
 
         working_days = 0
         current = start
@@ -1792,6 +1837,8 @@ class SprintMetricsService:
         )
         velocity_data = self._calculate_velocity(historical_sprints, historical_issues)
         historical_velocity = velocity_data.get("averageVelocity", 0)
+        raw_historical_velocity = velocity_data.get("rawAverageVelocity", 0)
+        standard_sprint_days = velocity_data.get("standardSprintDays", 10)
 
         # Calculate planning metrics
         total_points = 0.0
@@ -1886,6 +1933,8 @@ class SprintMetricsService:
             "bugRatio": round(bug_ratio, 1),
             "initiativeLinkedPercent": round(initiative_linked_pct, 1),
             "historicalVelocity": round(historical_velocity, 1),
+            "rawHistoricalVelocity": round(raw_historical_velocity, 1),
+            "standardSprintDays": standard_sprint_days,
             "velocitySprintCount": velocity_sprint_count,
             "velocityDelta": round(velocity_delta, 1),
             "velocityStatus": velocity_status

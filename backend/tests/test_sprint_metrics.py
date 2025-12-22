@@ -140,7 +140,6 @@ class TestCalculateVelocity:
         assert result["sprints"][1]["completedPoints"] == 8.0  # Sprint 3
         assert result["sprints"][2]["completedPoints"] == 0    # Sprint 2 (empty)
         assert result["sprints"][3]["completedPoints"] == 0    # Sprint 1 (not completed)
-        assert result["averageVelocity"] == 4.0  # (8+8+0+0)/4
 
     def test_handles_empty_sprints(self, mock_jira_credentials):
         """Should handle sprints with no issues."""
@@ -154,6 +153,135 @@ class TestCalculateVelocity:
 
         assert result["sprints"][0]["completedPoints"] == 0
         assert result["averageVelocity"] == 0
+
+    def test_normalizes_velocity_for_different_sprint_lengths(self, mock_jira_credentials):
+        """Should normalize velocity based on sprint length."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        # 5 sprints of 10 working days, 1 sprint of 20 working days
+        sprints = [
+            {"id": 1, "name": "Sprint 1", "startDate": "2024-01-01T00:00:00.000Z", "endDate": "2024-01-15T00:00:00.000Z"},  # 10 days
+            {"id": 2, "name": "Sprint 2", "startDate": "2024-01-15T00:00:00.000Z", "endDate": "2024-01-29T00:00:00.000Z"},  # 10 days
+            {"id": 3, "name": "Sprint 3", "startDate": "2024-01-29T00:00:00.000Z", "endDate": "2024-02-12T00:00:00.000Z"},  # 10 days
+            {"id": 4, "name": "Sprint 4", "startDate": "2024-02-12T00:00:00.000Z", "endDate": "2024-02-26T00:00:00.000Z"},  # 10 days
+            {"id": 5, "name": "Sprint 5", "startDate": "2024-02-26T00:00:00.000Z", "endDate": "2024-03-11T00:00:00.000Z"},  # 10 days
+            {"id": 6, "name": "Sprint 6", "startDate": "2024-03-11T00:00:00.000Z", "endDate": "2024-04-08T00:00:00.000Z"},  # 20 days
+        ]
+
+        sprint_issues = {
+            1: [{"key": "P-1", "fields": {"resolution": {"name": "Done"}, "customfield_10002": 50.0}}],
+            2: [{"key": "P-2", "fields": {"resolution": {"name": "Done"}, "customfield_10002": 50.0}}],
+            3: [{"key": "P-3", "fields": {"resolution": {"name": "Done"}, "customfield_10002": 50.0}}],
+            4: [{"key": "P-4", "fields": {"resolution": {"name": "Done"}, "customfield_10002": 50.0}}],
+            5: [{"key": "P-5", "fields": {"resolution": {"name": "Done"}, "customfield_10002": 50.0}}],
+            6: [{"key": "P-6", "fields": {"resolution": {"name": "Done"}, "customfield_10002": 80.0}}],  # 20-day sprint
+        }
+
+        with patch.object(service, '_get_story_points_fields', return_value=['customfield_10002']):
+            result = service._calculate_velocity(sprints, sprint_issues)
+
+        # Standard sprint should be 10 days (median)
+        assert result["standardSprintDays"] == 10
+
+        # The 20-day sprint completed 80 pts = 4 pts/day
+        # Normalized to 10 days = 40 pts
+        sprint_6 = next(s for s in result["sprints"] if s["sprintId"] == 6)
+        assert sprint_6["completedPoints"] == 80.0  # Raw points preserved
+        assert sprint_6["pointsPerDay"] == 4.0
+        assert sprint_6["normalizedPoints"] == 40.0
+
+        # 10-day sprints should have same normalized as raw
+        sprint_1 = next(s for s in result["sprints"] if s["sprintId"] == 1)
+        assert sprint_1["completedPoints"] == 50.0
+        assert sprint_1["normalizedPoints"] == 50.0
+
+        # Average velocity should use normalized points
+        # (50+50+50+50+50+40) / 6 = 48.33
+        assert result["averageVelocity"] == 48.3
+
+        # Raw average should be (50+50+50+50+50+80) / 6 = 55
+        assert result["rawAverageVelocity"] == 55.0
+
+    def test_uses_median_for_standard_sprint_length(self, mock_jira_credentials):
+        """Should use median sprint length as standard."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        # 4 sprints: 5, 10, 10, 20 days - median should be 10
+        sprints = [
+            {"id": 1, "name": "Sprint 1", "startDate": "2024-01-01T00:00:00.000Z", "endDate": "2024-01-08T00:00:00.000Z"},  # 5 days
+            {"id": 2, "name": "Sprint 2", "startDate": "2024-01-08T00:00:00.000Z", "endDate": "2024-01-22T00:00:00.000Z"},  # 10 days
+            {"id": 3, "name": "Sprint 3", "startDate": "2024-01-22T00:00:00.000Z", "endDate": "2024-02-05T00:00:00.000Z"},  # 10 days
+            {"id": 4, "name": "Sprint 4", "startDate": "2024-02-05T00:00:00.000Z", "endDate": "2024-03-04T00:00:00.000Z"},  # 20 days
+        ]
+
+        sprint_issues = {s["id"]: [] for s in sprints}
+
+        with patch.object(service, '_get_story_points_fields', return_value=['customfield_10002']):
+            result = service._calculate_velocity(sprints, sprint_issues)
+
+        # Median of [5, 10, 10, 20] = (10 + 10) / 2 = 10
+        assert result["standardSprintDays"] == 10
+
+    def test_single_sprint_uses_own_length(self, mock_jira_credentials):
+        """Single sprint should use its own length as standard."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        sprints = [
+            {"id": 1, "name": "Sprint 1", "startDate": "2024-01-01T00:00:00.000Z", "endDate": "2024-01-22T00:00:00.000Z"},  # 15 days
+        ]
+
+        sprint_issues = {
+            1: [{"key": "P-1", "fields": {"resolution": {"name": "Done"}, "customfield_10002": 30.0}}],
+        }
+
+        with patch.object(service, '_get_story_points_fields', return_value=['customfield_10002']):
+            result = service._calculate_velocity(sprints, sprint_issues)
+
+        assert result["standardSprintDays"] == 15
+        # With single sprint at standard length, normalized = raw
+        assert result["sprints"][0]["normalizedPoints"] == 30.0
+        assert result["sprints"][0]["completedPoints"] == 30.0
+
+    def test_same_length_sprints_no_normalization_effect(self, mock_jira_credentials):
+        """When all sprints are same length, normalized equals raw."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        sprints = [
+            {"id": 1, "name": "Sprint 1", "startDate": "2024-01-01T00:00:00.000Z", "endDate": "2024-01-15T00:00:00.000Z"},
+            {"id": 2, "name": "Sprint 2", "startDate": "2024-01-15T00:00:00.000Z", "endDate": "2024-01-29T00:00:00.000Z"},
+            {"id": 3, "name": "Sprint 3", "startDate": "2024-01-29T00:00:00.000Z", "endDate": "2024-02-12T00:00:00.000Z"},
+        ]
+
+        sprint_issues = {
+            1: [{"key": "P-1", "fields": {"resolution": {"name": "Done"}, "customfield_10002": 40.0}}],
+            2: [{"key": "P-2", "fields": {"resolution": {"name": "Done"}, "customfield_10002": 50.0}}],
+            3: [{"key": "P-3", "fields": {"resolution": {"name": "Done"}, "customfield_10002": 45.0}}],
+        }
+
+        with patch.object(service, '_get_story_points_fields', return_value=['customfield_10002']):
+            result = service._calculate_velocity(sprints, sprint_issues)
+
+        # All same length, so normalized should equal raw
+        for sprint in result["sprints"]:
+            assert sprint["normalizedPoints"] == sprint["completedPoints"]
+
+        assert result["averageVelocity"] == result["rawAverageVelocity"]
+
+    def test_includes_working_days_in_response(self, mock_jira_credentials):
+        """Each sprint should include working days count."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        sprints = [
+            {"id": 1, "name": "Sprint 1", "startDate": "2024-01-01T00:00:00.000Z", "endDate": "2024-01-15T00:00:00.000Z"},
+        ]
+
+        sprint_issues = {1: []}
+
+        with patch.object(service, '_get_story_points_fields', return_value=['customfield_10002']):
+            result = service._calculate_velocity(sprints, sprint_issues)
+
+        assert "workingDays" in result["sprints"][0]
+        assert result["sprints"][0]["workingDays"] == 10  # 2 weeks excluding weekends
 
 
 class TestCalculateCompletion:

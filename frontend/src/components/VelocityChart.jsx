@@ -15,7 +15,7 @@ function formatDate(dateStr) {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
-function VelocityChart({ data }) {
+function VelocityChart({ data, standardSprintDays }) {
   if (!data || data.length === 0) {
     return <div style={{ padding: '40px', textAlign: 'center', color: '#666' }}>No sprint data available</div>
   }
@@ -32,9 +32,15 @@ function VelocityChart({ data }) {
       ? sprint.sprintName.substring(0, 15) + '...'
       : sprint.sprintName
 
+    // Use normalized points if available, fall back to raw points
+    const displayPoints = sprint.normalizedPoints ?? sprint.completedPoints
+
     return {
       name: dateRange ? `${sprintLabel} ${dateRange}` : sprintLabel,
-      points: sprint.completedPoints,
+      points: displayPoints,
+      rawPoints: sprint.completedPoints,
+      normalizedPoints: sprint.normalizedPoints,
+      workingDays: sprint.workingDays,
       fullName: sprint.sprintName,
       startDate: sprint.startDate,
       endDate: sprint.endDate,
@@ -42,7 +48,7 @@ function VelocityChart({ data }) {
     }
   })
 
-  // Calculate average for reference line
+  // Calculate average for reference line (using displayed points)
   const avgVelocity = chartData.reduce((sum, d) => sum + d.points, 0) / chartData.length
 
   return (
@@ -65,6 +71,7 @@ function VelocityChart({ data }) {
           content={({ active, payload }) => {
             if (active && payload && payload.length) {
               const data = payload[0].payload
+              const hasNormalization = data.normalizedPoints !== undefined && data.normalizedPoints !== data.rawPoints
               return (
                 <div style={{
                   background: 'white',
@@ -78,11 +85,18 @@ function VelocityChart({ data }) {
                   {(data.startDate || data.endDate) && (
                     <div style={{ color: '#666', marginBottom: '4px', fontSize: '12px' }}>
                       {formatDate(data.startDate)} - {formatDate(data.endDate)}
+                      {data.workingDays && ` (${data.workingDays} working days)`}
                     </div>
                   )}
                   <div style={{ color: '#0052CC' }}>
-                    {payload[0].value} story points
+                    {payload[0].value.toFixed(1)} story points
+                    {hasNormalization && ' (normalized)'}
                   </div>
+                  {hasNormalization && (
+                    <div style={{ color: '#666', fontSize: '12px', marginTop: '4px' }}>
+                      Raw: {data.rawPoints} pts
+                    </div>
+                  )}
                 </div>
               )
             }

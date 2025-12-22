@@ -921,7 +921,7 @@ function Dashboard({ credentials, onLogout }) {
               <MetricCard
                 title="Average Velocity"
                 value={metrics.velocity?.averageVelocity || 0}
-                unit="pts/sprint"
+                unit={metrics.velocity?.standardSprintDays ? `pts/${metrics.velocity.standardSprintDays}-day sprint` : "pts/sprint"}
               />
               <MetricCard
                 title="Completion Rate"
@@ -951,10 +951,18 @@ function Dashboard({ credentials, onLogout }) {
                         {(metrics.velocity?.averageVelocity || 0).toFixed(1)}
                         <span style={styles.calloutUnit}> pts</span>
                       </div>
+                      {metrics.velocity?.standardSprintDays && (
+                        <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
+                          per {metrics.velocity.standardSprintDays}-day sprint
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
-                <VelocityChart data={metrics.velocity?.sprints || []} />
+                <VelocityChart
+                  data={metrics.velocity?.sprints || []}
+                  standardSprintDays={metrics.velocity?.standardSprintDays}
+                />
               </div>
             )}
 

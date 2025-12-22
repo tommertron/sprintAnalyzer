@@ -219,3 +219,123 @@ def app():
 def client(app):
     """Create Flask test client."""
     return app.test_client()
+
+
+@pytest.fixture
+def sample_issue_with_changelog():
+    """Sample issue with status change history."""
+    return {
+        "key": "PROJ-200",
+        "fields": {
+            "summary": "Feature with status changes",
+            "issuetype": {"name": "Story", "subtask": False},
+            "status": {"name": "Done"},
+            "resolution": {"name": "Done"},
+            "created": "2024-01-02T09:00:00.000+0000",
+            "resolutiondate": "2024-01-10T17:00:00.000+0000",
+            "customfield_10002": 5.0,
+            "changelog": {
+                "histories": [
+                    {
+                        "created": "2024-01-02T09:00:00.000+0000",
+                        "items": [
+                            {
+                                "field": "status",
+                                "fromString": None,
+                                "toString": "To Do"
+                            }
+                        ]
+                    },
+                    {
+                        "created": "2024-01-03T10:00:00.000+0000",
+                        "items": [
+                            {
+                                "field": "status",
+                                "fromString": "To Do",
+                                "toString": "In Progress"
+                            }
+                        ]
+                    },
+                    {
+                        "created": "2024-01-05T14:00:00.000+0000",
+                        "items": [
+                            {
+                                "field": "status",
+                                "fromString": "In Progress",
+                                "toString": "Code Review"
+                            }
+                        ]
+                    },
+                    {
+                        "created": "2024-01-08T11:00:00.000+0000",
+                        "items": [
+                            {
+                                "field": "status",
+                                "fromString": "Code Review",
+                                "toString": "Done"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+
+
+@pytest.fixture
+def sample_issue_no_changelog():
+    """Sample issue without changelog (stayed in one status)."""
+    return {
+        "key": "PROJ-201",
+        "fields": {
+            "summary": "Quick fix",
+            "issuetype": {"name": "Bug", "subtask": False},
+            "status": {"name": "Done"},
+            "resolution": {"name": "Done"},
+            "created": "2024-01-05T09:00:00.000+0000",
+            "resolutiondate": "2024-01-06T10:00:00.000+0000",
+            "customfield_10002": 2.0,
+            "changelog": {"histories": []}
+        }
+    }
+
+
+@pytest.fixture
+def sample_issue_multiple_transitions():
+    """Sample issue that went back and forth between statuses."""
+    return {
+        "key": "PROJ-202",
+        "fields": {
+            "summary": "Issue with rework",
+            "issuetype": {"name": "Story", "subtask": False},
+            "status": {"name": "Done"},
+            "resolution": {"name": "Done"},
+            "created": "2024-01-02T08:00:00.000+0000",
+            "resolutiondate": "2024-01-12T16:00:00.000+0000",
+            "customfield_10002": 3.0,
+            "changelog": {
+                "histories": [
+                    {
+                        "created": "2024-01-03T09:00:00.000+0000",
+                        "items": [{"field": "status", "fromString": "To Do", "toString": "In Progress"}]
+                    },
+                    {
+                        "created": "2024-01-05T10:00:00.000+0000",
+                        "items": [{"field": "status", "fromString": "In Progress", "toString": "Code Review"}]
+                    },
+                    {
+                        "created": "2024-01-06T11:00:00.000+0000",
+                        "items": [{"field": "status", "fromString": "Code Review", "toString": "In Progress"}]
+                    },
+                    {
+                        "created": "2024-01-10T14:00:00.000+0000",
+                        "items": [{"field": "status", "fromString": "In Progress", "toString": "Code Review"}]
+                    },
+                    {
+                        "created": "2024-01-12T16:00:00.000+0000",
+                        "items": [{"field": "status", "fromString": "Code Review", "toString": "Done"}]
+                    }
+                ]
+            }
+        }
+    }

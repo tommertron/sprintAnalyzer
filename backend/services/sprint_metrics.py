@@ -1032,6 +1032,324 @@ class SprintMetricsService:
 
         return working_days if working_days > 0 else 10
 
+    def _calculate_time_in_status(self, sprints: list, sprint_issues: dict) -> dict:
+        """Calculate time spent in each status for sprint issues.
+
+        Returns metrics showing where work spends time, helping identify
+        bottlenecks in the team's workflow.
+        """
+        sprint_status_metrics = []
+
+        for sprint in sprints:
+            issues = sprint_issues.get(sprint["id"], [])
+            sprint_start = self._parse_date(sprint.get("startDate"))
+            sprint_end = self._parse_date(sprint.get("endDate"))
+
+            if not sprint_start or not sprint_end:
+                continue
+
+            # Make timezone-naive for comparisons
+            if hasattr(sprint_start, 'replace'):
+                sprint_start = sprint_start.replace(tzinfo=None)
+            if hasattr(sprint_end, 'replace'):
+                sprint_end = sprint_end.replace(tzinfo=None)
+
+            # Track time per status across all issues
+            # Structure: {status: [time_in_hours_per_issue, ...]}
+            status_times = {}
+            status_issue_counts = {}
+
+            for issue in issues:
+                fields = issue.get("fields", {})
+                changelog = fields.get("changelog", {})
+                histories = changelog.get("histories", []) if isinstance(changelog, dict) else []
+
+                # Build timeline of status transitions
+                transitions = []
+                current_status = None
+
+                # Sort histories by creation date
+                sorted_histories = sorted(
+                    histories,
+                    key=lambda h: self._parse_date(h.get("created")) or datetime.min
+                )
+
+                for history in sorted_histories:
+                    for item in history.get("items", []):
+                        if item.get("field") == "status":
+                            transition_time = self._parse_date(history.get("created"))
+                            if transition_time:
+                                if hasattr(transition_time, 'replace'):
+                                    transition_time = transition_time.replace(tzinfo=None)
+                                transitions.append({
+                                    "time": transition_time,
+                                    "fromStatus": item.get("fromString"),
+                                    "toStatus": item.get("toString")
+                                })
+
+                # If no transitions found, use current status from issue creation
+                if not transitions:
+                    current_status_name = fields.get("status", {}).get("name")
+                    if current_status_name:
+                        created = self._parse_date(fields.get("created"))
+                        if created:
+                            if hasattr(created, 'replace'):
+                                created = created.replace(tzinfo=None)
+                            # Calculate time from creation to sprint end (or resolution)
+                            resolution = self._parse_date(fields.get("resolutiondate"))
+                            if resolution:
+                                if hasattr(resolution, 'replace'):
+                                    resolution = resolution.replace(tzinfo=None)
+                                end_time = min(resolution, sprint_end)
+                            else:
+                                end_time = sprint_end
+
+                            start_time = max(created, sprint_start)
+                            if start_time < end_time:
+                                hours = (end_time - start_time).total_seconds() / 3600
+                                if current_status_name not in status_times:
+                                    status_times[current_status_name] = []
+                                    status_issue_counts[current_status_name] = set()
+                                status_times[current_status_name].append(hours)
+                                status_issue_counts[current_status_name].add(issue.get("key"))
+                    continue
+
+                # Process transitions to calculate time in each status
+                for i, transition in enumerate(transitions):
+                    status = transition["fromStatus"]
+                    transition_start = transition["time"]
+
+                    # Find when this status ended
+                    if i + 1 < len(transitions):
+                        transition_end = transitions[i + 1]["time"]
+                    else:
+                        # Last known status - use resolution date or sprint end
+                        resolution = self._parse_date(fields.get("resolutiondate"))
+                        if resolution:
+                            if hasattr(resolution, 'replace'):
+                                resolution = resolution.replace(tzinfo=None)
+                            transition_end = min(resolution, sprint_end)
+                        else:
+                            transition_end = sprint_end
+
+                    # Only count time within sprint boundaries
+                    actual_start = max(transition_start, sprint_start)
+                    actual_end = min(transition_end, sprint_end)
+
+                    if actual_start < actual_end and status:
+                        hours = (actual_end - actual_start).total_seconds() / 3600
+                        if status not in status_times:
+                            status_times[status] = []
+                            status_issue_counts[status] = set()
+                        status_times[status].append(hours)
+                        status_issue_counts[status].add(issue.get("key"))
+
+                # Handle the final status (toStatus of last transition)
+                if transitions:
+                    last_transition = transitions[-1]
+                    final_status = last_transition["toStatus"]
+                    transition_start = last_transition["time"]
+
+                    resolution = self._parse_date(fields.get("resolutiondate"))
+                    if resolution:
+                        if hasattr(resolution, 'replace'):
+                            resolution = resolution.replace(tzinfo=None)
+                        transition_end = min(resolution, sprint_end)
+                    else:
+                        transition_end = sprint_end
+
+                    actual_start = max(transition_start, sprint_start)
+                    actual_end = min(transition_end, sprint_end)
+
+                    if actual_start < actual_end and final_status:
+                        hours = (actual_end - actual_start).total_seconds() / 3600
+                        if final_status not in status_times:
+                            status_times[final_status] = []
+                            status_issue_counts[final_status] = set()
+                        status_times[final_status].append(hours)
+                        status_issue_counts[final_status].add(issue.get("key"))
+
+            # Calculate statistics for each status
+            status_breakdown = []
+            total_cycle_time = 0
+
+            for status, times in status_times.items():
+                if times:
+                    total_time = sum(times)
+                    total_cycle_time += total_time
+                    avg_time = total_time / len(times)
+                    sorted_times = sorted(times)
+                    median_time = sorted_times[len(sorted_times) // 2]
+                    p90_idx = int(len(sorted_times) * 0.9)
+                    p90_time = sorted_times[p90_idx] if p90_idx < len(sorted_times) else sorted_times[-1]
+
+                    status_breakdown.append({
+                        "status": status,
+                        "avgTimeHours": round(avg_time, 1),
+                        "medianTimeHours": round(median_time, 1),
+                        "p90TimeHours": round(p90_time, 1),
+                        "totalTimeHours": round(total_time, 1),
+                        "issueCount": len(status_issue_counts[status]),
+                        "percentOfCycleTime": 0  # Will calculate after we know total
+                    })
+
+            # Calculate percentages
+            for status_data in status_breakdown:
+                if total_cycle_time > 0:
+                    status_data["percentOfCycleTime"] = round(
+                        (status_data["totalTimeHours"] / total_cycle_time) * 100, 1
+                    )
+
+            # Sort by total time (descending) to identify bottlenecks
+            status_breakdown.sort(key=lambda x: x["totalTimeHours"], reverse=True)
+
+            # Identify bottleneck (status with highest average time)
+            bottleneck = status_breakdown[0]["status"] if status_breakdown else None
+
+            sprint_status_metrics.append({
+                "sprintId": sprint["id"],
+                "sprintName": sprint["name"],
+                "startDate": sprint.get("startDate"),
+                "endDate": sprint.get("endDate"),
+                "statusBreakdown": status_breakdown,
+                "bottleneckStatus": bottleneck,
+                "totalCycleTimeHours": round(total_cycle_time, 1)
+            })
+
+        return {"sprints": sprint_status_metrics}
+
+    def _calculate_sprint_carryover(self, sprints: list, sprint_issues: dict) -> dict:
+        """Calculate sprint carryover/spillover metrics.
+
+        Tracks issues that appear in multiple sprints, helping identify:
+        - Work that repeatedly doesn't get finished
+        - Estimation or scope problems
+        - Blocked work patterns
+        """
+        # Track issue history across sprints
+        # Structure: {issue_key: [sprint_id1, sprint_id2, ...]}
+        issue_sprint_history = {}
+
+        # Build history of which sprints each issue appeared in
+        for sprint in sprints:
+            sprint_id = sprint["id"]
+            issues = sprint_issues.get(sprint_id, [])
+
+            for issue in issues:
+                issue_key = issue.get("key")
+                if issue_key not in issue_sprint_history:
+                    issue_sprint_history[issue_key] = []
+                issue_sprint_history[issue_key].append(sprint_id)
+
+        # Analyze each sprint for carryover
+        sprint_carryover_metrics = []
+
+        for i, sprint in enumerate(sprints):
+            sprint_id = sprint["id"]
+            issues = sprint_issues.get(sprint_id, [])
+
+            # Get previous sprint (if exists)
+            previous_sprint_id = sprints[i + 1]["id"] if i + 1 < len(sprints) else None
+
+            total_issues = len(issues)
+            carryover_issues = []
+            new_issues = []
+            repeat_offenders = []  # Issues in 3+ sprints
+
+            total_points = 0.0
+            carryover_points = 0.0
+
+            for issue in issues:
+                issue_key = issue.get("key")
+                fields = issue.get("fields", {})
+                points = self._get_story_points(issue) or 0
+                total_points += points
+
+                # Count how many sprints this issue has been in
+                sprint_count = len(issue_sprint_history.get(issue_key, []))
+
+                # Check if this was in the previous sprint
+                was_in_previous = (
+                    previous_sprint_id and
+                    previous_sprint_id in issue_sprint_history.get(issue_key, [])
+                )
+
+                issue_data = {
+                    "key": issue_key,
+                    "summary": fields.get("summary", ""),
+                    "issueType": fields.get("issuetype", {}).get("name", ""),
+                    "status": fields.get("status", {}).get("name", ""),
+                    "isCompleted": self._is_completed(issue),
+                    "points": points,
+                    "sprintCount": sprint_count
+                }
+
+                if was_in_previous:
+                    carryover_issues.append(issue_data)
+                    carryover_points += points
+                else:
+                    new_issues.append(issue_data)
+
+                # Flag repeat offenders (3+ sprints)
+                if sprint_count >= 3:
+                    repeat_offenders.append(issue_data)
+
+            # Calculate percentages
+            carryover_count = len(carryover_issues)
+            carryover_pct = (carryover_count / total_issues * 100) if total_issues > 0 else 0
+            carryover_points_pct = (carryover_points / total_points * 100) if total_points > 0 else 0
+
+            # Track completion rate of carryover vs new
+            carryover_completed = sum(1 for i in carryover_issues if i["isCompleted"])
+            new_completed = sum(1 for i in new_issues if i["isCompleted"])
+
+            carryover_completion_rate = (
+                (carryover_completed / carryover_count * 100) if carryover_count > 0 else 0
+            )
+            new_completion_rate = (
+                (new_completed / len(new_issues) * 100) if len(new_issues) > 0 else 0
+            )
+
+            sprint_carryover_metrics.append({
+                "sprintId": sprint_id,
+                "sprintName": sprint["name"],
+                "startDate": sprint.get("startDate"),
+                "endDate": sprint.get("endDate"),
+                "totalIssues": total_issues,
+                "totalPoints": round(total_points, 1),
+                "carryoverCount": carryover_count,
+                "carryoverPercentage": round(carryover_pct, 1),
+                "carryoverPoints": round(carryover_points, 1),
+                "carryoverPointsPercentage": round(carryover_points_pct, 1),
+                "newIssuesCount": len(new_issues),
+                "carryoverCompletionRate": round(carryover_completion_rate, 1),
+                "newCompletionRate": round(new_completion_rate, 1),
+                "repeatOffendersCount": len(repeat_offenders),
+                "repeatOffenders": sorted(
+                    repeat_offenders,
+                    key=lambda x: x["sprintCount"],
+                    reverse=True
+                )[:10],  # Top 10 repeat offenders
+                "carryoverIssues": sorted(
+                    carryover_issues,
+                    key=lambda x: x["sprintCount"],
+                    reverse=True
+                )
+            })
+
+        # Calculate overall stats
+        total_carryover = sum(s["carryoverCount"] for s in sprint_carryover_metrics)
+        total_issues_all = sum(s["totalIssues"] for s in sprint_carryover_metrics)
+        avg_carryover_pct = (
+            (total_carryover / total_issues_all * 100) if total_issues_all > 0 else 0
+        )
+
+        return {
+            "sprints": sprint_carryover_metrics,
+            "averageCarryoverPercentage": round(avg_carryover_pct, 1),
+            "totalSprints": len(sprint_carryover_metrics)
+        }
+
     def _calculate_contributor_velocity(self, sprints: list, sprint_issues: dict) -> dict:
         """Calculate per-person velocity metrics from prefetched data.
 
@@ -1201,6 +1519,28 @@ class SprintMetricsService:
         """
         sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
         return self._calculate_contributor_velocity(sprints, sprint_issues)
+
+    def get_time_in_status_metrics(self, board_id: int,
+                                     start_date: str = None, end_date: str = None,
+                                     sprint_count: int = None) -> dict:
+        """Calculate time in status metrics for sprints.
+
+        Returns time spent in each workflow status, helping identify
+        bottlenecks and improve flow efficiency.
+        """
+        sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
+        return self._calculate_time_in_status(sprints, sprint_issues)
+
+    def get_sprint_carryover_metrics(self, board_id: int,
+                                      start_date: str = None, end_date: str = None,
+                                      sprint_count: int = None) -> dict:
+        """Calculate sprint carryover/spillover metrics.
+
+        Returns data about issues that appear in multiple sprints,
+        helping identify scope, estimation, or blocking issues.
+        """
+        sprints, sprint_issues = self._prefetch_all_data(board_id, start_date, end_date, sprint_count)
+        return self._calculate_sprint_carryover(sprints, sprint_issues)
 
     def get_all_metrics(self, board_id: int, excluded_spaces: list = None,
                         start_date: str = None, end_date: str = None,

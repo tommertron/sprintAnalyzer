@@ -212,3 +212,129 @@ class TestBoardSprints:
         assert response.status_code == 200
         data = json.loads(response.data)
         assert len(data["data"]) == 3
+
+
+class TestMetricsTimeInStatus:
+    """Test time in status metrics endpoint."""
+
+    def test_time_in_status_missing_credentials(self, client):
+        """Should return 401 when credentials are missing."""
+        response = client.get("/api/metrics/123/time-in-status")
+        assert response.status_code == 401
+
+    @patch("app.api.metrics.SprintMetricsService")
+    def test_time_in_status_success(self, mock_service_class, client):
+        """Should return time in status metrics."""
+        # Mock service instance
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
+
+        # Mock response data
+        mock_service.get_time_in_status_metrics.return_value = {
+            "sprints": [
+                {
+                    "sprintId": 100,
+                    "sprintName": "Sprint 1",
+                    "statusBreakdown": [
+                        {
+                            "status": "In Progress",
+                            "avgTimeHours": 24.5,
+                            "medianTimeHours": 22.0,
+                            "p90TimeHours": 35.0,
+                            "totalTimeHours": 98.0,
+                            "issueCount": 4,
+                            "percentOfCycleTime": 45.0
+                        },
+                        {
+                            "status": "Code Review",
+                            "avgTimeHours": 12.0,
+                            "medianTimeHours": 10.0,
+                            "p90TimeHours": 18.0,
+                            "totalTimeHours": 48.0,
+                            "issueCount": 4,
+                            "percentOfCycleTime": 22.0
+                        }
+                    ],
+                    "bottleneckStatus": "In Progress",
+                    "totalCycleTimeHours": 218.0
+                }
+            ]
+        }
+
+        response = client.get("/api/metrics/123/time-in-status", headers={
+            "X-Jira-Server": "https://test.atlassian.net",
+            "X-Jira-Email": "test@example.com",
+            "X-Jira-Token": "token123"
+        })
+
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert "data" in data
+        assert "sprints" in data["data"]
+        assert len(data["data"]["sprints"]) == 1
+
+        sprint_data = data["data"]["sprints"][0]
+        assert sprint_data["bottleneckStatus"] == "In Progress"
+        assert len(sprint_data["statusBreakdown"]) == 2
+        assert sprint_data["statusBreakdown"][0]["status"] == "In Progress"
+
+    @patch("app.api.metrics.SprintMetricsService")
+    def test_time_in_status_with_date_range(self, mock_service_class, client):
+        """Should pass date range parameters to service."""
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
+        mock_service.get_time_in_status_metrics.return_value = {"sprints": []}
+
+        response = client.get(
+            "/api/metrics/123/time-in-status?start_date=2024-01-01&end_date=2024-03-31",
+            headers={
+                "X-Jira-Server": "https://test.atlassian.net",
+                "X-Jira-Email": "test@example.com",
+                "X-Jira-Token": "token123"
+            }
+        )
+
+        assert response.status_code == 200
+        # Verify service was called with date parameters
+        mock_service.get_time_in_status_metrics.assert_called_once_with(
+            123, "2024-01-01", "2024-03-31", 6
+        )
+
+    @patch("app.api.metrics.SprintMetricsService")
+    def test_time_in_status_with_sprint_count(self, mock_service_class, client):
+        """Should pass sprint count parameter to service."""
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
+        mock_service.get_time_in_status_metrics.return_value = {"sprints": []}
+
+        response = client.get(
+            "/api/metrics/123/time-in-status?sprint_count=10",
+            headers={
+                "X-Jira-Server": "https://test.atlassian.net",
+                "X-Jira-Email": "test@example.com",
+                "X-Jira-Token": "token123"
+            }
+        )
+
+        assert response.status_code == 200
+        # Verify service was called with sprint count
+        mock_service.get_time_in_status_metrics.assert_called_once_with(
+            123, None, None, 10
+        )
+
+    @patch("app.api.metrics.SprintMetricsService")
+    def test_time_in_status_handles_service_error(self, mock_service_class, client):
+        """Should return 500 on service error."""
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
+        mock_service.get_time_in_status_metrics.side_effect = Exception("Service error")
+
+        response = client.get("/api/metrics/123/time-in-status", headers={
+            "X-Jira-Server": "https://test.atlassian.net",
+            "X-Jira-Email": "test@example.com",
+            "X-Jira-Token": "token123"
+        })
+
+        assert response.status_code == 500
+        data = json.loads(response.data)
+        assert "error" in data

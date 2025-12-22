@@ -382,3 +382,34 @@ def get_planning_metrics(board_id, sprint_id):
         return jsonify({"data": planning_data})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/<int:board_id>/time-in-status", methods=["GET"])
+def get_time_in_status(board_id):
+    """Get time in status metrics for sprints.
+
+    Query params:
+        - start_date: Optional ISO date (e.g., "2024-01-01")
+        - end_date: Optional ISO date (e.g., "2024-03-31")
+        - sprint_count: Optional number of sprints to include (default: 6)
+
+    Returns:
+        - Per-status time metrics (average, median, 90th percentile)
+        - Status breakdown showing where time is spent
+        - Bottleneck identification (status with most time)
+        - Percentage of cycle time per status
+    """
+    server, email, token = get_jira_credentials()
+
+    if not server:
+        return jsonify({"error": "Missing Jira credentials in headers"}), 401
+
+    start_date, end_date = get_date_range()
+    sprint_count = get_sprint_count() or 6
+
+    try:
+        service = SprintMetricsService(server, email, token)
+        time_in_status_data = service.get_time_in_status_metrics(board_id, start_date, end_date, sprint_count)
+        return jsonify({"data": time_in_status_data})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500

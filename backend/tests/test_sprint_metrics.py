@@ -384,6 +384,261 @@ class TestCalculateAlignment:
         assert result["sprints"][0]["orphanCount"] == 5.0
 
 
+class TestCalculateTimeInStatus:
+    """Test time in status calculation."""
+
+    def test_calculates_time_per_status(self, mock_jira_credentials, sample_issue_with_changelog):
+        """Should calculate time spent in each status."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        sprints = [{
+            "id": 1,
+            "name": "Sprint 1",
+            "startDate": "2024-01-01T00:00:00.000+0000",
+            "endDate": "2024-01-14T00:00:00.000+0000"
+        }]
+        sprint_issues = {1: [sample_issue_with_changelog]}
+
+        result = service._calculate_time_in_status(sprints, sprint_issues)
+
+        assert len(result["sprints"]) == 1
+        sprint_data = result["sprints"][0]
+
+        # Check that we have status breakdown
+        assert "statusBreakdown" in sprint_data
+        assert len(sprint_data["statusBreakdown"]) > 0
+
+        # Find specific statuses
+        statuses = {s["status"]: s for s in sprint_data["statusBreakdown"]}
+
+        # Should have tracked "To Do", "In Progress", "Code Review", and "Done"
+        assert "To Do" in statuses
+        assert "In Progress" in statuses
+        assert "Code Review" in statuses
+
+    def test_handles_issue_without_changelog(self, mock_jira_credentials, sample_issue_no_changelog):
+        """Should handle issues that never changed status."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        sprints = [{
+            "id": 1,
+            "name": "Sprint 1",
+            "startDate": "2024-01-01T00:00:00.000+0000",
+            "endDate": "2024-01-14T00:00:00.000+0000"
+        }]
+        sprint_issues = {1: [sample_issue_no_changelog]}
+
+        result = service._calculate_time_in_status(sprints, sprint_issues)
+
+        assert len(result["sprints"]) == 1
+        sprint_data = result["sprints"][0]
+
+        # Should track time in current status (Done)
+        assert len(sprint_data["statusBreakdown"]) == 1
+        assert sprint_data["statusBreakdown"][0]["status"] == "Done"
+        # Time from creation (Jan 5 09:00) to resolution (Jan 6 10:00) = 25 hours
+        assert sprint_data["statusBreakdown"][0]["avgTimeHours"] == 25.0
+
+    def test_handles_multiple_transitions_same_status(self, mock_jira_credentials, sample_issue_multiple_transitions):
+        """Should correctly handle issues that transition back to same status."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        sprints = [{
+            "id": 1,
+            "name": "Sprint 1",
+            "startDate": "2024-01-01T00:00:00.000+0000",
+            "endDate": "2024-01-14T00:00:00.000+0000"
+        }]
+        sprint_issues = {1: [sample_issue_multiple_transitions]}
+
+        result = service._calculate_time_in_status(sprints, sprint_issues)
+
+        sprint_data = result["sprints"][0]
+        statuses = {s["status"]: s for s in sprint_data["statusBreakdown"]}
+
+        # "In Progress" appears twice in the timeline
+        # First: Jan 3 09:00 to Jan 5 10:00 = 49 hours
+        # Second: Jan 6 11:00 to Jan 10 14:00 = 99 hours
+        # Total: 148 hours tracked across 2 occurrences
+        assert "In Progress" in statuses
+        assert statuses["In Progress"]["issueCount"] == 1  # One issue
+
+    def test_calculates_statistical_metrics(self, mock_jira_credentials, sample_issue_with_changelog):
+        """Should calculate avg, median, and p90 time per status."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        # Create two issues to test statistics
+        issue2 = {
+            "key": "PROJ-203",
+            "fields": {
+                "summary": "Another feature",
+                "issuetype": {"name": "Story", "subtask": False},
+                "status": {"name": "Done"},
+                "resolution": {"name": "Done"},
+                "created": "2024-01-02T10:00:00.000+0000",
+                "resolutiondate": "2024-01-08T12:00:00.000+0000",
+                "customfield_10002": 3.0,
+                "changelog": {
+                    "histories": [
+                        {
+                            "created": "2024-01-03T10:00:00.000+0000",
+                            "items": [{"field": "status", "fromString": "To Do", "toString": "In Progress"}]
+                        },
+                        {
+                            "created": "2024-01-08T12:00:00.000+0000",
+                            "items": [{"field": "status", "fromString": "In Progress", "toString": "Done"}]
+                        }
+                    ]
+                }
+            }
+        }
+
+        sprints = [{
+            "id": 1,
+            "name": "Sprint 1",
+            "startDate": "2024-01-01T00:00:00.000+0000",
+            "endDate": "2024-01-14T00:00:00.000+0000"
+        }]
+        sprint_issues = {1: [sample_issue_with_changelog, issue2]}
+
+        result = service._calculate_time_in_status(sprints, sprint_issues)
+
+        sprint_data = result["sprints"][0]
+
+        # Each status should have avgTimeHours, medianTimeHours, p90TimeHours
+        for status_data in sprint_data["statusBreakdown"]:
+            assert "avgTimeHours" in status_data
+            assert "medianTimeHours" in status_data
+            assert "p90TimeHours" in status_data
+            assert "issueCount" in status_data
+            assert "percentOfCycleTime" in status_data
+
+    def test_identifies_bottleneck(self, mock_jira_credentials, sample_issue_with_changelog):
+        """Should identify the status with most time as bottleneck."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        sprints = [{
+            "id": 1,
+            "name": "Sprint 1",
+            "startDate": "2024-01-01T00:00:00.000+0000",
+            "endDate": "2024-01-14T00:00:00.000+0000"
+        }]
+        sprint_issues = {1: [sample_issue_with_changelog]}
+
+        result = service._calculate_time_in_status(sprints, sprint_issues)
+
+        sprint_data = result["sprints"][0]
+
+        # Should identify a bottleneck
+        assert "bottleneckStatus" in sprint_data
+        assert sprint_data["bottleneckStatus"] is not None
+
+        # Bottleneck should be the status with highest total time
+        sorted_statuses = sorted(
+            sprint_data["statusBreakdown"],
+            key=lambda x: x["totalTimeHours"],
+            reverse=True
+        )
+        assert sprint_data["bottleneckStatus"] == sorted_statuses[0]["status"]
+
+    def test_respects_sprint_boundaries(self, mock_jira_credentials):
+        """Should only count time within sprint boundaries."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        # Issue created before sprint, with transition during sprint, resolved after sprint
+        issue = {
+            "key": "PROJ-204",
+            "fields": {
+                "summary": "Long running issue",
+                "issuetype": {"name": "Story", "subtask": False},
+                "status": {"name": "Done"},
+                "resolution": {"name": "Done"},
+                "created": "2023-12-20T10:00:00.000+0000",  # Before sprint
+                "resolutiondate": "2024-01-20T15:00:00.000+0000",  # After sprint
+                "customfield_10002": 5.0,
+                "changelog": {
+                    "histories": [
+                        {
+                            "created": "2024-01-05T10:00:00.000+0000",  # During sprint
+                            "items": [{"field": "status", "fromString": "To Do", "toString": "In Progress"}]
+                        },
+                        {
+                            "created": "2024-01-10T14:00:00.000+0000",  # During sprint
+                            "items": [{"field": "status", "fromString": "In Progress", "toString": "Code Review"}]
+                        },
+                        {
+                            "created": "2024-01-20T12:00:00.000+0000",  # After sprint ends
+                            "items": [{"field": "status", "fromString": "Code Review", "toString": "Done"}]
+                        }
+                    ]
+                }
+            }
+        }
+
+        sprints = [{
+            "id": 1,
+            "name": "Sprint 1",
+            "startDate": "2024-01-01T00:00:00.000+0000",
+            "endDate": "2024-01-14T00:00:00.000+0000"  # 13 days = 312 hours
+        }]
+        sprint_issues = {1: [issue]}
+
+        result = service._calculate_time_in_status(sprints, sprint_issues)
+
+        sprint_data = result["sprints"][0]
+        statuses = {s["status"]: s for s in sprint_data["statusBreakdown"]}
+
+        # Verify statuses are tracked
+        assert len(statuses) > 0
+
+        # Most importantly: total time should not exceed sprint duration (312 hours)
+        total_time = sum(s["totalTimeHours"] for s in sprint_data["statusBreakdown"])
+        assert total_time <= 312.0, f"Total time {total_time} exceeds sprint duration 312.0"
+
+        # Each individual status should also be bounded
+        for status, data in statuses.items():
+            assert data["totalTimeHours"] <= 312.0, f"Status '{status}' has {data['totalTimeHours']} hours > 312"
+
+    def test_calculates_percentage_of_cycle_time(self, mock_jira_credentials, sample_issue_with_changelog):
+        """Should calculate what percentage each status is of total cycle time."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        sprints = [{
+            "id": 1,
+            "name": "Sprint 1",
+            "startDate": "2024-01-01T00:00:00.000+0000",
+            "endDate": "2024-01-14T00:00:00.000+0000"
+        }]
+        sprint_issues = {1: [sample_issue_with_changelog]}
+
+        result = service._calculate_time_in_status(sprints, sprint_issues)
+
+        sprint_data = result["sprints"][0]
+
+        # All percentages should sum to approximately 100%
+        total_percentage = sum(s["percentOfCycleTime"] for s in sprint_data["statusBreakdown"])
+        assert 99.0 <= total_percentage <= 101.0  # Allow for rounding
+
+    def test_handles_empty_sprint(self, mock_jira_credentials):
+        """Should handle sprint with no issues gracefully."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        sprints = [{
+            "id": 1,
+            "name": "Sprint 1",
+            "startDate": "2024-01-01T00:00:00.000+0000",
+            "endDate": "2024-01-14T00:00:00.000+0000"
+        }]
+        sprint_issues = {1: []}
+
+        result = service._calculate_time_in_status(sprints, sprint_issues)
+
+        sprint_data = result["sprints"][0]
+        assert sprint_data["statusBreakdown"] == []
+        assert sprint_data["bottleneckStatus"] is None
+        assert sprint_data["totalCycleTimeHours"] == 0
+
+
 class TestPublicMethods:
     """Test public API methods."""
 
@@ -397,6 +652,21 @@ class TestPublicMethods:
         with patch.object(service, '_prefetch_all_data', return_value=(mock_sprints, mock_issues)) as mock_prefetch:
             with patch.object(service, '_calculate_velocity', return_value={"test": True}) as mock_calc:
                 result = service.get_velocity_metrics(123)
+
+        mock_prefetch.assert_called_once()
+        mock_calc.assert_called_once()
+        assert result == {"test": True}
+
+    def test_get_time_in_status_metrics_calls_prefetch(self, mock_jira_credentials):
+        """get_time_in_status_metrics should prefetch data and calculate."""
+        service = SprintMetricsService(**mock_jira_credentials)
+
+        mock_sprints = [{"id": 1, "name": "Sprint 1"}]
+        mock_issues = {1: []}
+
+        with patch.object(service, '_prefetch_all_data', return_value=(mock_sprints, mock_issues)) as mock_prefetch:
+            with patch.object(service, '_calculate_time_in_status', return_value={"test": True}) as mock_calc:
+                result = service.get_time_in_status_metrics(123)
 
         mock_prefetch.assert_called_once()
         mock_calc.assert_called_once()

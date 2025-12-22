@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { getBoards, getMetricsSummary, getFutureSprints, getActiveSprint, getPlanningMetrics, getCapacity, getContributorVelocity, getProjectMembers } from '../services/api'
+import { getBoards, getMetricsSummary, getFutureSprints, getActiveSprint, getPlanningMetrics, getCapacity, getContributorVelocity, getProjectMembers, getTimeInStatusMetrics, getSprintCarryoverMetrics } from '../services/api'
 import BoardSelector from '../components/BoardSelector'
 import DateRangeSelector from '../components/DateRangeSelector'
 import SpaceExclusionList from '../components/SpaceExclusionList'
@@ -8,6 +8,8 @@ import VelocityChart from '../components/VelocityChart'
 import CompletionChart from '../components/CompletionChart'
 import QualityMetrics from '../components/QualityMetrics'
 import AlignmentChart from '../components/AlignmentChart'
+import TimeInStatusChart from '../components/TimeInStatusChart'
+import SprintCarryoverChart from '../components/SprintCarryoverChart'
 import SprintSelector from '../components/SprintSelector'
 import PlanningMetrics from '../components/PlanningMetrics'
 import CapacityPlanning from '../components/CapacityPlanning'
@@ -279,6 +281,11 @@ function Dashboard({ credentials, onLogout }) {
   const [capacityLoading, setCapacityLoading] = useState(false)
   const [projectMembers, setProjectMembers] = useState([])
 
+  // Workflow health metrics state
+  const [timeInStatusData, setTimeInStatusData] = useState(null)
+  const [carryoverData, setCarryoverData] = useState(null)
+  const [workflowMetricsLoading, setWorkflowMetricsLoading] = useState(false)
+
   // Ref to track sprint that was just loaded by the main planning effect
   const lastLoadedSprintRef = useRef(null)
 
@@ -304,6 +311,16 @@ function Dashboard({ credentials, onLogout }) {
       setLastFetched(null)
     }
   }, [selectedBoard, dateRange, excludedSpaces, serviceLabel])
+
+  // Load workflow health metrics (time in status & carryover) when on metrics tab
+  useEffect(() => {
+    if (activeTab === 'metrics' && selectedBoard) {
+      loadWorkflowMetrics(selectedBoard)
+    } else {
+      setTimeInStatusData(null)
+      setCarryoverData(null)
+    }
+  }, [activeTab, selectedBoard, dateRange])
 
   const loadBoards = async () => {
     try {
@@ -379,6 +396,24 @@ function Dashboard({ credentials, onLogout }) {
 
     setRecentBoards(newRecent)
     saveToStorage(RECENT_BOARDS_KEY, newRecent)
+  }
+
+  const loadWorkflowMetrics = async (boardId) => {
+    setWorkflowMetricsLoading(true)
+    try {
+      const [timeInStatus, carryover] = await Promise.all([
+        getTimeInStatusMetrics(credentials, boardId, dateRange),
+        getSprintCarryoverMetrics(credentials, boardId, dateRange)
+      ])
+      setTimeInStatusData(timeInStatus)
+      setCarryoverData(carryover)
+    } catch (err) {
+      console.error('Failed to load workflow metrics:', err)
+      setTimeInStatusData(null)
+      setCarryoverData(null)
+    } finally {
+      setWorkflowMetricsLoading(false)
+    }
   }
 
   const handleExcludedSpacesChange = (newExcluded) => {
@@ -1016,6 +1051,26 @@ function Dashboard({ credentials, onLogout }) {
                 jiraServer={credentials.server}
                 serviceLabel={serviceLabel}
               />
+            </div>
+
+            <div style={styles.chartSection}>
+              <div style={styles.sectionHeader}>
+                <h2 style={styles.sectionTitle}>Workflow Health {getSprintCountLabel()}</h2>
+              </div>
+              {workflowMetricsLoading && <div style={styles.loading}>Loading workflow metrics...</div>}
+              {!workflowMetricsLoading && timeInStatusData && (
+                <TimeInStatusChart data={timeInStatusData} />
+              )}
+            </div>
+
+            <div style={styles.chartSection}>
+              <div style={styles.sectionHeader}>
+                <h2 style={styles.sectionTitle}>Sprint Carryover Analysis {getSprintCountLabel()}</h2>
+              </div>
+              {workflowMetricsLoading && <div style={styles.loading}>Loading carryover metrics...</div>}
+              {!workflowMetricsLoading && carryoverData && (
+                <SprintCarryoverChart data={carryoverData} />
+              )}
             </div>
                   </>
                 )}

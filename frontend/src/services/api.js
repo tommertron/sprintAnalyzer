@@ -13,6 +13,34 @@ export function setAuthErrorHandler(callback) {
   onAuthError = callback
 }
 
+// ============================================
+// Local Credentials Storage APIs
+// ============================================
+
+/**
+ * Load credentials from backend file storage
+ */
+export async function loadStoredCredentials() {
+  const response = await axios.get(`${API_BASE}/credentials`)
+  return response.data.data
+}
+
+/**
+ * Save credentials to backend file storage
+ * @param {Object} credentials - { jira?: {...}, bamboo?: {...} }
+ */
+export async function saveStoredCredentials(credentials) {
+  const response = await axios.post(`${API_BASE}/credentials`, credentials)
+  return response.data.data
+}
+
+/**
+ * Clear all stored credentials
+ */
+export async function clearStoredCredentials() {
+  await axios.delete(`${API_BASE}/credentials`)
+}
+
 /**
  * Create axios instance with Jira credentials in headers
  */

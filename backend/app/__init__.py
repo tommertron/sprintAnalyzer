@@ -12,7 +12,7 @@ def create_app():
     CORS(app, resources={
         r"/api/*": {
             "origins": ["http://localhost:5173", "http://127.0.0.1:5173"],
-            "methods": ["GET", "POST", "OPTIONS"],
+            "methods": ["GET", "POST", "DELETE", "OPTIONS"],
             "allow_headers": [
                 "Content-Type",
                 "X-Jira-Token", "X-Jira-Email", "X-Jira-Server",
@@ -22,12 +22,13 @@ def create_app():
     })
 
     # Register blueprints
-    from app.api import auth, boards, metrics, debug, bamboo
+    from app.api import auth, boards, metrics, debug, bamboo, credentials
     app.register_blueprint(auth.bp)
     app.register_blueprint(boards.bp)
     app.register_blueprint(metrics.bp)
     app.register_blueprint(debug.bp)
     app.register_blueprint(bamboo.bp)
+    app.register_blueprint(credentials.bp)
 
     # Health check endpoint
     @app.route("/health")

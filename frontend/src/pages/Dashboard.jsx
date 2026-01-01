@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { getBoards, getMetricsSummary, getFutureSprints, getActiveSprint, getPlanningMetrics, getCapacity, getContributorVelocity, getProjectMembers, getTimeInStatusMetrics, getSprintCarryoverMetrics } from '../services/api'
+import { getBoards, getMetricsSummary, getFutureSprints, getActiveSprint, getPlanningMetrics, getCapacity, getContributorVelocity, getProjectMembers, getTimeInStatusMetrics, getSprintCarryoverMetrics, loadStoredCredentials } from '../services/api'
 import BoardSelector from '../components/BoardSelector'
 import DateRangeSelector from '../components/DateRangeSelector'
 import SpaceExclusionList from '../components/SpaceExclusionList'
@@ -21,7 +21,6 @@ const HIDDEN_CHARTS_KEY = 'sprintAnalyzer_hiddenCharts'
 const METRICS_CACHE_KEY = 'sprintAnalyzer_metricsCache'
 const EXCLUDED_SPACES_KEY = 'sprintAnalyzer_excludedSpaces'
 const SERVICE_LABEL_KEY = 'sprintAnalyzer_serviceLabel'
-const BAMBOO_CREDENTIALS_KEY = 'sprintAnalyzer_bambooCredentials'
 const SELECTED_MEMBERS_KEY = 'sprintAnalyzer_selectedMembers'
 const MAX_RECENT_BOARDS = 5
 const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
@@ -329,6 +328,7 @@ function Dashboard({ credentials, onLogout, onCredentialsUpdate, tokenError, onD
   const [contributorVelocity, setContributorVelocity] = useState(null)
   const [capacityLoading, setCapacityLoading] = useState(false)
   const [projectMembers, setProjectMembers] = useState([])
+  const [bambooCredentials, setBambooCredentials] = useState(null)
 
   // Workflow health metrics state
   const [timeInStatusData, setTimeInStatusData] = useState(null)
@@ -350,6 +350,21 @@ function Dashboard({ credentials, onLogout, onCredentialsUpdate, tokenError, onD
     setExcludedSpaces(loadFromStorage(EXCLUDED_SPACES_KEY, []))
     setServiceLabel(loadFromStorage(SERVICE_LABEL_KEY, null))
     setHiddenCharts(loadFromStorage(HIDDEN_CHARTS_KEY, []))
+  }, [])
+
+  // Load BambooHR credentials from backend storage
+  useEffect(() => {
+    async function loadBamboo() {
+      try {
+        const stored = await loadStoredCredentials()
+        if (stored?.bamboo) {
+          setBambooCredentials(stored.bamboo)
+        }
+      } catch (e) {
+        // No stored credentials
+      }
+    }
+    loadBamboo()
   }, [])
 
   // Load boards list
@@ -554,8 +569,7 @@ function Dashboard({ credentials, onLogout, onCredentialsUpdate, tokenError, onD
       return
     }
 
-    // Get BambooHR credentials and selected members from localStorage
-    const bambooCredentials = loadFromStorage(BAMBOO_CREDENTIALS_KEY, null)
+    // Get selected members from localStorage (bambooCredentials comes from state)
     const selectedMemberIds = loadFromStorage(`${SELECTED_MEMBERS_KEY}_${boardId}`, [])
 
     if (!bambooCredentials || selectedMemberIds.length === 0) {
@@ -689,8 +703,7 @@ function Dashboard({ credentials, onLogout, onCredentialsUpdate, tokenError, onD
         if (!cancelled) setPlanningLoading(false)
       }
 
-      // Load capacity data if configured
-      const bambooCredentials = loadFromStorage(BAMBOO_CREDENTIALS_KEY, null)
+      // Load capacity data if configured (bambooCredentials comes from state)
       const selectedMemberIds = loadFromStorage(`${SELECTED_MEMBERS_KEY}_${selectedBoard}`, [])
 
       if (bambooCredentials && selectedMemberIds.length > 0 && sprint) {
@@ -759,8 +772,7 @@ function Dashboard({ credentials, onLogout, onCredentialsUpdate, tokenError, onD
         if (!cancelled) setPlanningLoading(false)
       }
 
-      // Load capacity data if configured
-      const bambooCredentials = loadFromStorage(BAMBOO_CREDENTIALS_KEY, null)
+      // Load capacity data if configured (bambooCredentials comes from state)
       const selectedMemberIds = loadFromStorage(`${SELECTED_MEMBERS_KEY}_${selectedBoard}`, [])
 
       if (bambooCredentials && selectedMemberIds.length > 0 && projectMembers.length > 0) {

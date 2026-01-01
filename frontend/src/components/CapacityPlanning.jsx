@@ -1,7 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { getProjectMembers, searchJiraUsers, getHolidays, getTeamTimeOff } from '../services/api'
-
-const BAMBOO_CREDENTIALS_KEY = 'sprintAnalyzer_bambooCredentials'
+import { getProjectMembers, searchJiraUsers, getHolidays, getTeamTimeOff, loadStoredCredentials, saveStoredCredentials } from '../services/api'
 const SELECTED_MEMBERS_KEY = 'sprintAnalyzer_selectedMembers'
 const ADDED_MEMBERS_KEY = 'sprintAnalyzer_addedMembers'
 
@@ -285,12 +283,20 @@ function CapacityPlanning({ credentials, boardId }) {
 
   // Load saved credentials and selected members on mount
   useEffect(() => {
-    const savedBamboo = loadFromStorage(BAMBOO_CREDENTIALS_KEY, null)
-    if (savedBamboo) {
-      setBambooToken(savedBamboo.token)
-      setBambooSubdomain(savedBamboo.subdomain)
-      setBambooConnected(true)
+    async function loadBambooCredentials() {
+      try {
+        const stored = await loadStoredCredentials()
+        if (stored?.bamboo) {
+          setBambooToken(stored.bamboo.token)
+          setBambooSubdomain(stored.bamboo.subdomain)
+          setBambooConnected(true)
+        }
+      } catch (e) {
+        // No stored credentials
+      }
     }
+    loadBambooCredentials()
+
     const savedMembers = loadFromStorage(`${SELECTED_MEMBERS_KEY}_${boardId}`, [])
     if (savedMembers.length > 0) {
       setSelectedMemberIds(new Set(savedMembers))
@@ -427,21 +433,33 @@ function CapacityPlanning({ credentials, boardId }) {
     }
   }
 
-  const handleConnectBamboo = () => {
+  const handleConnectBamboo = async () => {
     if (!bambooToken || !bambooSubdomain) {
       setError('Please enter both BambooHR API key and subdomain.')
       return
     }
-    saveToStorage(BAMBOO_CREDENTIALS_KEY, {
-      token: bambooToken,
-      subdomain: bambooSubdomain
-    })
+    try {
+      await saveStoredCredentials({
+        bamboo: { token: bambooToken, subdomain: bambooSubdomain }
+      })
+    } catch (e) {
+      console.error('Failed to save Bamboo credentials:', e)
+    }
     setBambooConnected(true)
     setError(null)
   }
 
-  const handleDisconnectBamboo = () => {
-    localStorage.removeItem(BAMBOO_CREDENTIALS_KEY)
+  const handleDisconnectBamboo = async () => {
+    try {
+      // Clear bamboo credentials by saving null
+      const stored = await loadStoredCredentials()
+      if (stored?.bamboo) {
+        delete stored.bamboo
+        await saveStoredCredentials(stored.jira ? { jira: stored.jira } : {})
+      }
+    } catch (e) {
+      console.error('Failed to clear Bamboo credentials:', e)
+    }
     setBambooToken('')
     setBambooSubdomain('')
     setBambooConnected(false)

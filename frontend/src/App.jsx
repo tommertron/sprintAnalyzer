@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
-import { setAuthErrorHandler } from './services/api'
+import { setAuthErrorHandler, loadStoredCredentials, saveStoredCredentials, clearStoredCredentials } from './services/api'
 
 function App() {
   const [credentials, setCredentials] = useState(null)
   const [tokenError, setTokenError] = useState(null)
+  const [loading, setLoading] = useState(true)
 
   // Set up global auth error handler
   useEffect(() => {
@@ -16,31 +17,49 @@ function App() {
   }, [])
 
   useEffect(() => {
-    // Check for stored credentials on mount
-    const stored = localStorage.getItem('jiraCredentials')
-    if (stored) {
+    // Load credentials from backend file storage
+    async function loadCredentials() {
       try {
-        setCredentials(JSON.parse(stored))
+        const stored = await loadStoredCredentials()
+        if (stored?.jira) {
+          setCredentials(stored.jira)
+        }
       } catch (e) {
-        localStorage.removeItem('jiraCredentials')
+        // Backend not available or no credentials stored
+        console.log('No stored credentials found')
+      } finally {
+        setLoading(false)
       }
     }
+    loadCredentials()
   }, [])
 
-  const handleLogin = (creds) => {
-    localStorage.setItem('jiraCredentials', JSON.stringify(creds))
+  const handleLogin = async (creds) => {
+    try {
+      await saveStoredCredentials({ jira: creds })
+    } catch (e) {
+      console.error('Failed to save credentials to backend:', e)
+    }
     setCredentials(creds)
     setTokenError(null)
   }
 
-  const handleLogout = () => {
-    localStorage.removeItem('jiraCredentials')
+  const handleLogout = async () => {
+    try {
+      await clearStoredCredentials()
+    } catch (e) {
+      console.error('Failed to clear credentials:', e)
+    }
     setCredentials(null)
     setTokenError(null)
   }
 
-  const handleCredentialsUpdate = useCallback((updatedCreds) => {
-    localStorage.setItem('jiraCredentials', JSON.stringify(updatedCreds))
+  const handleCredentialsUpdate = useCallback(async (updatedCreds) => {
+    try {
+      await saveStoredCredentials({ jira: updatedCreds })
+    } catch (e) {
+      console.error('Failed to save credentials to backend:', e)
+    }
     setCredentials(updatedCreds)
     setTokenError(null)
   }, [])
@@ -48,6 +67,14 @@ function App() {
   const handleDismissTokenError = useCallback(() => {
     setTokenError(null)
   }, [])
+
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', color: '#666' }}>
+        Loading...
+      </div>
+    )
+  }
 
   if (!credentials) {
     return <Login onLogin={handleLogin} />

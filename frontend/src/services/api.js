@@ -2,11 +2,22 @@ import axios from 'axios'
 
 const API_BASE = '/api'
 
+// Global error handler for 401 errors (expired/invalid tokens)
+let onAuthError = null
+
+/**
+ * Set a callback to be called when authentication fails (401 error)
+ * @param {Function} callback - Called with error message when auth fails
+ */
+export function setAuthErrorHandler(callback) {
+  onAuthError = callback
+}
+
 /**
  * Create axios instance with Jira credentials in headers
  */
 function createClient(credentials) {
-  return axios.create({
+  const client = axios.create({
     baseURL: API_BASE,
     headers: {
       'Content-Type': 'application/json',
@@ -15,6 +26,20 @@ function createClient(credentials) {
       'X-Jira-Token': credentials.token
     }
   })
+
+  // Add response interceptor to catch 401 errors
+  client.interceptors.response.use(
+    (response) => response,
+    (error) => {
+      if (error.response?.status === 401 && onAuthError) {
+        const message = error.response?.data?.error || 'Your API token is invalid or has expired. Please update your token in Settings.'
+        onAuthError(message)
+      }
+      return Promise.reject(error)
+    }
+  )
+
+  return client
 }
 
 /**

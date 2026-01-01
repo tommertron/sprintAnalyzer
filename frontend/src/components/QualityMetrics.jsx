@@ -39,6 +39,7 @@ function QualityMetrics({ data }) {
       bugRatio: sprint.bugRatio,
       incompletePercentage: sprint.incompletePercentage,
       averageTicketAgeDays: sprint.averageTicketAgeDays,
+      averageActiveCycleTimeDays: sprint.averageActiveCycleTimeDays || 0,
       bugCount: sprint.bugCount,
       completedBugs: sprint.completedBugs,
       totalIssues: sprint.totalIssues,
@@ -99,8 +100,11 @@ function QualityMetrics({ data }) {
                   <div style={{ color: '#FF8B00', marginBottom: '2px' }}>
                     Incomplete: {data.incompletePercentage}% ({data.totalIssues - data.completedIssues} of {data.totalIssues})
                   </div>
-                  <div style={{ color: '#6554C0' }}>
-                    Avg Ticket Age: {data.averageTicketAgeDays} days
+                  <div style={{ color: '#00875A', marginBottom: '2px' }}>
+                    Active Cycle Time: {data.averageActiveCycleTimeDays} days
+                  </div>
+                  <div style={{ color: '#6554C0', fontSize: '11px' }}>
+                    (Total Ticket Age: {data.averageTicketAgeDays} days)
                   </div>
                 </div>
               )
@@ -114,11 +118,11 @@ function QualityMetrics({ data }) {
         <Line
           yAxisId="right"
           type="monotone"
-          dataKey="averageTicketAgeDays"
-          name="Avg Ticket Age (days)"
-          stroke="#6554C0"
+          dataKey="averageActiveCycleTimeDays"
+          name="Active Cycle Time (days)"
+          stroke="#00875A"
           strokeWidth={2}
-          dot={{ fill: '#6554C0', strokeWidth: 2 }}
+          dot={{ fill: '#00875A', strokeWidth: 2 }}
         />
       </ComposedChart>
     </ResponsiveContainer>

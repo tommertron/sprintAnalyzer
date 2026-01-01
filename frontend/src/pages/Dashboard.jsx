@@ -241,6 +241,42 @@ const styles = {
     gap: '24px',
     marginBottom: '24px',
     flexWrap: 'wrap'
+  },
+  tokenErrorBanner: {
+    background: '#FFEBE6',
+    borderBottom: '1px solid #FFBDAD',
+    padding: '12px 24px'
+  },
+  tokenErrorContent: {
+    maxWidth: '1200px',
+    margin: '0 auto',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    color: '#BF2600'
+  },
+  tokenErrorText: {
+    flex: 1,
+    fontSize: '14px'
+  },
+  tokenErrorBtn: {
+    background: '#DE350B',
+    border: 'none',
+    borderRadius: '4px',
+    color: 'white',
+    padding: '6px 12px',
+    fontSize: '13px',
+    fontWeight: '500',
+    cursor: 'pointer'
+  },
+  tokenErrorDismiss: {
+    background: 'none',
+    border: 'none',
+    fontSize: '20px',
+    color: '#BF2600',
+    cursor: 'pointer',
+    padding: '0 4px',
+    lineHeight: 1
   }
 }
 
@@ -263,7 +299,7 @@ function saveToStorage(key, value) {
   }
 }
 
-function Dashboard({ credentials, onLogout }) {
+function Dashboard({ credentials, onLogout, onCredentialsUpdate, tokenError, onDismissTokenError }) {
   const [boards, setBoards] = useState([])
   const [selectedBoard, setSelectedBoard] = useState(null)
   const [dateRange, setDateRange] = useState(null) // null = last 6 sprints default
@@ -302,6 +338,7 @@ function Dashboard({ credentials, onLogout }) {
   // Settings state
   const [hiddenCharts, setHiddenCharts] = useState([])
   const [showSettings, setShowSettings] = useState(false)
+  const [settingsInitialTab, setSettingsInitialTab] = useState('display')
 
   // Ref to track sprint that was just loaded by the main planning effect
   const lastLoadedSprintRef = useRef(null)
@@ -806,7 +843,7 @@ function Dashboard({ credentials, onLogout }) {
             />
           )}
           <span>{credentials.user?.displayName || credentials.email}</span>
-          <button style={styles.settingsBtn} onClick={() => setShowSettings(true)}>
+          <button style={styles.settingsBtn} onClick={() => { setSettingsInitialTab('display'); setShowSettings(true); }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="3" />
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
@@ -824,7 +861,39 @@ function Dashboard({ credentials, onLogout }) {
         onClose={() => setShowSettings(false)}
         hiddenCharts={hiddenCharts}
         onHiddenChartsChange={handleHiddenChartsChange}
+        credentials={credentials}
+        onCredentialsUpdate={onCredentialsUpdate}
+        onLogout={onLogout}
+        initialTab={settingsInitialTab}
       />
+
+      {/* Token Error Banner */}
+      {tokenError && (
+        <div style={styles.tokenErrorBanner}>
+          <div style={styles.tokenErrorContent}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <span style={styles.tokenErrorText}>
+              <strong>API Token Error:</strong> {tokenError}
+            </span>
+            <button
+              style={styles.tokenErrorBtn}
+              onClick={() => { setSettingsInitialTab('credentials'); setShowSettings(true); }}
+            >
+              Update Token
+            </button>
+            <button
+              style={styles.tokenErrorDismiss}
+              onClick={onDismissTokenError}
+            >
+              &times;
+            </button>
+          </div>
+        </div>
+      )}
 
       <main style={styles.main}>
         <div style={styles.controls}>

@@ -87,6 +87,128 @@ class SprintMetricsService:
             self._status_categories_cache = {}
             return {}
 
+    def _calculate_active_cycle_time(self, issue: dict, sprint_start=None, sprint_end=None) -> float:
+        """Calculate total time an issue spent in 'In Progress' statuses.
+
+        This measures actual work time, not backlog time. Only counts time in
+        'indeterminate' category statuses (In Progress), excluding 'new' (To Do)
+        and 'done' (Done) categories.
+
+        Args:
+            issue: Issue dict with changelog data
+            sprint_start: Optional start boundary (datetime)
+            sprint_end: Optional end boundary (datetime)
+
+        Returns:
+            Total hours spent in In Progress statuses
+        """
+        status_categories = self._get_status_categories()
+
+        def is_in_progress_status(status_name: str) -> bool:
+            if not status_name:
+                return False
+            category = status_categories.get(status_name.lower(), "unknown")
+            return category == "indeterminate"
+
+        fields = issue.get("fields", {})
+        current_status_name = fields.get("status", {}).get("name")
+
+        # Get changelog - can be at issue level or in fields
+        changelog = issue.get("changelog") or fields.get("changelog") or {}
+        histories = changelog.get("histories", []) if isinstance(changelog, dict) else []
+
+        # Build timeline of status transitions
+        transitions = []
+        sorted_histories = sorted(
+            histories,
+            key=lambda h: self._parse_date(h.get("created")) or datetime.min
+        )
+
+        for history in sorted_histories:
+            for item in history.get("items", []):
+                if item.get("field") == "status":
+                    transition_time = self._parse_date(history.get("created"))
+                    if transition_time:
+                        if hasattr(transition_time, 'replace'):
+                            transition_time = transition_time.replace(tzinfo=None)
+                        transitions.append({
+                            "time": transition_time,
+                            "fromStatus": item.get("fromString"),
+                            "toStatus": item.get("toString")
+                        })
+
+        total_hours = 0.0
+
+        # If no transitions, check if issue is currently in an in-progress status
+        if not transitions:
+            if current_status_name and is_in_progress_status(current_status_name):
+                created = self._parse_date(fields.get("created"))
+                resolved = self._parse_date(fields.get("resolutiondate"))
+                if created:
+                    if hasattr(created, 'replace'):
+                        created = created.replace(tzinfo=None)
+                    start_time = created
+                    if sprint_start:
+                        start_time = max(created, sprint_start)
+                    end_time = resolved or sprint_end or datetime.now()
+                    if hasattr(end_time, 'replace'):
+                        end_time = end_time.replace(tzinfo=None)
+                    if sprint_end:
+                        end_time = min(end_time, sprint_end)
+                    if start_time < end_time:
+                        total_hours += (end_time - start_time).total_seconds() / 3600
+            return total_hours
+
+        # Process transitions
+        for i, transition in enumerate(transitions):
+            status = transition["fromStatus"]
+            if not status:
+                continue
+
+            # Determine when this status started
+            if i == 0:
+                created = self._parse_date(fields.get("created"))
+                if created:
+                    if hasattr(created, 'replace'):
+                        created = created.replace(tzinfo=None)
+                    status_start = created
+                else:
+                    status_start = transition["time"]
+            else:
+                status_start = transitions[i - 1]["time"]
+
+            status_end = transition["time"]
+
+            # Apply boundaries if provided
+            if sprint_start:
+                status_start = max(status_start, sprint_start)
+            if sprint_end:
+                status_end = min(status_end, sprint_end)
+
+            if status_start < status_end and is_in_progress_status(status):
+                total_hours += (status_end - status_start).total_seconds() / 3600
+
+        # Handle final/current status
+        if transitions:
+            last_transition = transitions[-1]
+            final_status = last_transition["toStatus"]
+            status_start = last_transition["time"]
+
+            resolved = self._parse_date(fields.get("resolutiondate"))
+            status_end = resolved or sprint_end or datetime.now()
+            if hasattr(status_end, 'replace'):
+                status_end = status_end.replace(tzinfo=None)
+
+            if sprint_start:
+                status_start = max(status_start, sprint_start)
+            if sprint_end:
+                status_end = min(status_end, sprint_end)
+
+            if status_start < status_end and final_status and is_in_progress_status(final_status):
+                total_hours += (status_end - status_start).total_seconds() / 3600
+
+        return total_hours
+
     def _get_sprints(self, board_id: int, limit: int = 6,
                      start_date: str = None, end_date: str = None,
                      sprint_count: int = None) -> list:
@@ -442,7 +564,11 @@ class SprintMetricsService:
         }
 
     def _calculate_quality(self, sprints: list, sprint_issues: dict) -> dict:
-        """Calculate quality metrics from prefetched data."""
+        """Calculate quality metrics from prefetched data.
+
+        Includes both traditional ticket age (creation to resolution) and
+        active cycle time (time spent in 'In Progress' statuses only).
+        """
         sprint_quality = []
 
         for sprint in sprints:
@@ -455,12 +581,16 @@ class SprintMetricsService:
             total_age_days = 0
             age_count = 0
 
+            # Track completed issue keys for active cycle time calculation
+            completed_issue_keys = set()
+
             for issue in issues:
                 fields = issue.get("fields", {})
                 issue_type = fields.get("issuetype", {}).get("name", "").lower()
 
                 if self._is_completed(issue):
                     completed_issues += 1
+                    completed_issue_keys.add(issue.get("key"))
 
                     if "bug" in issue_type:
                         completed_bugs += 1
@@ -480,6 +610,29 @@ class SprintMetricsService:
             bug_ratio = (completed_bugs / completed_issues * 100) if completed_issues > 0 else 0
             avg_age = total_age_days / age_count if age_count > 0 else 0
 
+            # Calculate active cycle time (time in 'In Progress' statuses only)
+            # This requires changelog data, so fetch historical issues
+            avg_active_cycle_time = 0
+            if completed_issue_keys:
+                try:
+                    historical_issues = self._get_sprint_issues_historical(sprint["id"])
+                    total_active_hours = 0
+                    active_cycle_count = 0
+
+                    for issue in historical_issues:
+                        if issue.get("key") in completed_issue_keys:
+                            active_hours = self._calculate_active_cycle_time(issue)
+                            if active_hours > 0:
+                                total_active_hours += active_hours
+                                active_cycle_count += 1
+
+                    if active_cycle_count > 0:
+                        # Convert hours to days for consistency
+                        avg_active_cycle_time = (total_active_hours / active_cycle_count) / 24
+                except Exception:
+                    # If changelog fetch fails, just skip active cycle time
+                    pass
+
             sprint_quality.append({
                 "sprintId": sprint["id"],
                 "sprintName": sprint["name"],
@@ -491,7 +644,8 @@ class SprintMetricsService:
                 "bugCount": bug_count,
                 "completedBugs": completed_bugs,
                 "bugRatio": round(bug_ratio, 1),
-                "averageTicketAgeDays": round(avg_age, 1)
+                "averageTicketAgeDays": round(avg_age, 1),
+                "averageActiveCycleTimeDays": round(avg_active_cycle_time, 1)
             })
 
         return {"sprints": sprint_quality}
